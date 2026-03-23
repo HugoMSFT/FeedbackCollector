@@ -1,38 +1,44 @@
 from app import app
 import os
 import logging
+from runtime_paths import DATA_DIR, TEMPLATES_DIR, ensure_runtime_directories
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-if __name__ == '__main__':
-    # Ensure we're in the correct directory
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    
-    # Create templates directory if it doesn't exist
-    templates_dir = os.path.join(os.path.dirname(__file__), 'templates')
-    if not os.path.exists(templates_dir):
-        os.makedirs(templates_dir)
-        print(f"Created templates directory at: {templates_dir}")
-    
-    # Create data directory if it doesn't exist
-    data_dir = os.path.join(os.path.dirname(__file__), 'data')
-    if not os.path.exists(data_dir):
-        os.makedirs(data_dir)
-        print(f"Created data directory at: {data_dir}")
-        
+
+def _get_bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def main():
+    ensure_runtime_directories()
+
+    host = os.getenv("FLASK_HOST", "127.0.0.1")
+    port = int(os.getenv("FLASK_PORT", os.getenv("PORT", "5000")))
+    debug = _get_bool_env("FLASK_DEBUG", False)
+
+    access_host = "localhost" if host in {"0.0.0.0", "127.0.0.1"} else host
+    access_url = f"http://{access_host}:{port}"
+
     print("\nStarting web interface for Feedback Collector")
     print("===========================================")
-    print("1. Access the interface at: http://localhost:5000")
+    print(f"1. Access the interface at: {access_url}")
     print("2. View and manage keywords")
     print("3. Run feedback collection")
     print("4. View collection results")
     print("===========================================\n")
-    
-    # Set the template folder explicitly
-    app.template_folder = os.path.abspath(templates_dir)
-    print(f"Template folder set to: {app.template_folder}")
-    
-    # Run the Flask application
-    app.run(debug=True, port=5000)
+    print(f"Template folder set to: {TEMPLATES_DIR}")
+    print(f"Data directory set to: {DATA_DIR}")
+
+    logger.info("Starting Feedback Collector on %s:%s (debug=%s)", host, port, debug)
+    app.run(debug=debug, host=host, port=port)
+
+
+if __name__ == "__main__":
+    main()

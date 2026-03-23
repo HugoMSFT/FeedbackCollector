@@ -10,5 +10,19 @@
   "workload",
   "Extension",
   "Extensions",
-  "workloads"
+  "workloads",
+  "data virtualization",
+  "openrowset",
+  "external tables",
+  "external table",
+  "parquet",
+  "delta",
+  "csv",
+  "external file format",
+  "cetas",
+  "ctas",
+  "create external table",
+  "create table as select",
+  "virtual data",
+  "data federation"
 ]

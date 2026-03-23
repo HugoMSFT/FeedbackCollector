@@ -1,6 +1,32 @@
-# FeedbackCollector Desktop Build Guide
+# FeedbackCollector Build Guide
 
-This directory contains scripts to build a standalone Windows executable of the FeedbackCollector application.
+This repository supports native builds on Windows, Linux, and macOS. The PowerShell scripts in this folder are Windows-specific helpers, and `build_package.py` is the portable build entrypoint.
+
+## Cross-Platform Build
+
+Build on the same operating system you want to run on. PyInstaller does not produce Windows binaries from macOS or Linux, and it does not produce macOS or Linux binaries from Windows.
+
+### Prerequisites
+```bash
+pip install -r src/requirements.txt
+pip install pyinstaller
+```
+
+Optional for Fabric SQL support:
+- Install `pyodbc`
+- Install a compatible SQL Server ODBC driver for your OS
+
+### Build
+```bash
+python build_package.py
+```
+
+Output:
+```text
+dist/FeedbackCollector/
+```
+
+If a `.env` file exists at the repository root or in `src/`, the build script copies it to the packaged application root.
 
 ## Quick Start
 
@@ -9,7 +35,7 @@ This directory contains scripts to build a standalone Windows executable of the 
 .\Setup_Desktop_Build.ps1
 ```
 
-This will:
+This Windows helper will:
 - Create build directory at `D:\FeedbackCollector_Desktop_Build`
 - Copy all source files including .env
 - Install PyInstaller and dependencies
@@ -25,7 +51,7 @@ After making changes to the source code, rebuild:
 
 Or double-click `Update_And_Rebuild.bat`
 
-This will:
+This Windows helper will:
 1. ✅ Copy updated source files from `D:\FeedbackCollector\src`
 2. ✅ **Always copy the .env file** (credentials included)
 3. ✅ Rebuild the Windows executable with PyInstaller

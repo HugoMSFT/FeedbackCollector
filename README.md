@@ -46,7 +46,7 @@ A comprehensive, enterprise-grade web-based tool that intelligently collects, pr
 ## 🛠️ Prerequisites
 
 - **Python 3.8+**
-- **Microsoft SQL Server ODBC Driver** (18, 17, 13, or Native Client 11.0)
+- **Microsoft SQL Server ODBC Driver** for Fabric SQL features only
 - **API Credentials**:
   - Reddit API (client_id, client_secret, user_agent)
   - GitHub Personal Access Token (repo scope)
@@ -68,10 +68,11 @@ pip install -r src/requirements.txt
 ```
 
 #### 2. **ODBC Driver Setup**
-Ensure you have one of the supported ODBC drivers installed:
+If you want Fabric SQL features, ensure you have one of the supported ODBC drivers installed:
 - ODBC Driver 18 for SQL Server (recommended)
 - ODBC Driver 17 for SQL Server
 - ODBC Driver 13 for SQL Server
+- Linux and macOS also need a working unixODBC setup before `pyodbc` can connect
 - SQL Server Native Client 11.0
 
 #### 3. **Environment Setup**
@@ -80,10 +81,23 @@ cp src/.env.template src/.env
 # Edit src/.env with your API credentials
 ```
 
+You can also place the `.env` file at the repository root if you prefer. The app now checks both locations.
+
 #### 4. **Launch Web Interface**
 ```bash
-cd src
-python run_web.py
+python start_feedback_collector.py
+```
+
+Alternative launch commands:
+
+```bash
+python src/run_web.py
+```
+
+Optional runtime configuration:
+
+```bash
+FLASK_HOST=127.0.0.1 FLASK_PORT=5000 FLASK_DEBUG=false python start_feedback_collector.py
 ```
 
 #### 5. **Access Application**
@@ -146,6 +160,22 @@ To share with others:
 - **No Python required**
 - **~500MB free disk space**
 - **API credentials** (Reddit, GitHub)
+
+### Cross-Platform Native Build
+
+Native packaging is supported on Windows, Linux, and macOS through PyInstaller. Build on the target operating system you plan to run on; PyInstaller does not cross-compile between operating systems.
+
+#### Build prerequisites
+- Install runtime dependencies: `pip install -r src/requirements.txt`
+- Install PyInstaller in the same environment: `pip install pyinstaller`
+- Optional for Fabric SQL support: install `pyodbc` plus the appropriate ODBC driver for your OS
+
+#### Build command
+```bash
+python build_package.py
+```
+
+The packaged app will be created under `dist/FeedbackCollector/` on the current OS.
 
 #### Troubleshooting
 - **Port 5000 in use?** Close other applications or restart PC
@@ -217,6 +247,17 @@ graph TB
 ```
 
 ### **Frontend Architecture**
+
+### **Local-First Runtime**
+
+The project no longer depends on GitHub Codespaces or GitHub Spark conventions to start correctly.
+
+- Start it from the repository root with `python start_feedback_collector.py`
+- Start it from the existing source entry point with `python src/run_web.py`
+- Store `.env` in either the repository root or `src/`
+- Runtime data is written to the repository-level `data/` folder consistently
+- Host, port, and debug mode can be controlled with `FLASK_HOST`, `FLASK_PORT`, and `FLASK_DEBUG`
+- Fabric SQL features are optional; the app still starts when `pyodbc` or an ODBC driver is not available
 
 #### **Components**
 - **Templates** (`src/templates/`): Bootstrap 5-powered responsive interfaces

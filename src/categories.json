@@ -297,6 +297,27 @@
         ],
         "priority": "medium",
         "feature_area": "Platform Integration"
+      },
+      "DATA_VIRTUALIZATION": {
+        "name": "Data Virtualization",
+        "keywords": [
+          "data virtualization",
+          "openrowset",
+          "external tables",
+          "external table",
+          "parquet",
+          "delta",
+          "csv",
+          "external file format",
+          "cetas",
+          "ctas",
+          "create external table",
+          "create table as select",
+          "virtual data",
+          "data federation"
+        ],
+        "priority": "high",
+        "feature_area": "Data Virtualization"
       }
     }
   }

@@ -1,32 +1,44 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
+import importlib.util
+
 block_cipher = None
 
-import os
-SPEC_DIR = os.path.dirname(os.path.abspath(SPEC))
+project_root = Path.cwd()
+src_dir = project_root / 'src'
+
+datas = [
+    (str(src_dir / 'templates'), 'src/templates'),
+    (str(src_dir / 'static'), 'src/static'),
+    (str(src_dir / 'categories.json'), 'src'),
+    (str(src_dir / 'impact_types.json'), 'src'),
+    (str(src_dir / 'keywords.json'), 'src'),
+]
+
+for env_candidate in [project_root / '.env', src_dir / '.env']:
+    if env_candidate.exists():
+        datas.append((str(env_candidate), '.'))
+        break
+
+
+def available_hiddenimports(*modules):
+    return [module for module in modules if importlib.util.find_spec(module) is not None]
 
 a = Analysis(
-    [os.path.join(SPEC_DIR, 'src', 'run_web.py')],
-    pathex=[SPEC_DIR],
+    ['start_feedback_collector.py'],
+    pathex=[],
     binaries=[],
-    datas=[
-        (os.path.join(SPEC_DIR, 'src', 'templates'), 'templates'),
-        (os.path.join(SPEC_DIR, 'src', 'static'), 'static'),
-        (os.path.join(SPEC_DIR, 'src', 'categories.json'), '.'),
-        (os.path.join(SPEC_DIR, 'src', 'impact_types.json'), '.'),
-        (os.path.join(SPEC_DIR, 'src', 'keywords.json'), '.'),
-        # .env is NOT bundled - place it next to FeedbackCollector.exe after build
-    ],
-    hiddenimports=[
+    datas=datas,
+    hiddenimports=available_hiddenimports(
         'praw',
         'requests',
         'pandas',
         'pyodbc',
         'flask',
         'jinja2',
-        'waitress',
         'dotenv',
-    ],
+    ),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -48,7 +60,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=True,  # Show console for logs
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -64,7 +76,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name='FeedbackCollector',
 )

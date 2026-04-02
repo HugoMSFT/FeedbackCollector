@@ -6,7 +6,6 @@ import logging
 from typing import List, Dict, Any, Tuple
 from textblob import TextBlob
 import json
-import xml.etree.ElementTree as ET
 import re
 import time
 import config
@@ -41,6 +40,7 @@ def find_matched_keywords(text: str, keywords: List[str]) -> List[str]:
 class RedditCollector:
     def __init__(self):
         self.max_items = config.MAX_ITEMS_PER_RUN
+        self.subreddits = getattr(config, 'REDDIT_SUBREDDITS', [config.REDDIT_SUBREDDIT])
         logger.debug(f"RedditCollector init with REDDIT_CLIENT_ID type: {type(config.REDDIT_CLIENT_ID).__name__}")
         logger.debug(
             f"RedditCollector init with REDDIT_CLIENT_SECRET type: {type(config.REDDIT_CLIENT_SECRET).__name__}"
@@ -71,78 +71,86 @@ class RedditCollector:
         if "max_items" in settings:
             self.max_items = settings["max_items"]
             logger.info(f"RedditCollector configured with max_items={self.max_items}")
+        if "subreddits" in settings:
+            self.subreddits = settings["subreddits"]
+            logger.info(f"RedditCollector configured with subreddits={self.subreddits}")
+        elif "subreddit" in settings:
+            self.subreddits = [settings["subreddit"]]
+            logger.info(f"RedditCollector configured with subreddit={settings['subreddit']}")
 
     def collect(self) -> List[Dict[str, Any]]:
         feedback_items = []
         try:
-            logger.info(f"Collecting feedback from Reddit subreddit: {config.REDDIT_SUBREDDIT}")
-            logger.info(f"Using keywords for search: {config.KEYWORDS}")
-            subreddit = self.reddit.subreddit(config.REDDIT_SUBREDDIT)
+            for subreddit_name in self.subreddits:
+                logger.info(f"Collecting feedback from Reddit subreddit: r/{subreddit_name}")
+                logger.info(f"Using keywords for search: {config.KEYWORDS}")
+                subreddit = self.reddit.subreddit(subreddit_name)
 
-            search_query = " OR ".join([f'"{k}"' for k in config.KEYWORDS])
-            logger.info(f"Reddit search query: {search_query}")
+                search_query = " OR ".join([f'"{k}"' for k in config.KEYWORDS])
+                logger.info(f"Reddit search query: {search_query}")
 
-            submissions_generator = subreddit.search(search_query, sort="new", limit=self.max_items)
+                per_sub_limit = max(1, self.max_items // len(self.subreddits))
+                submissions_generator = subreddit.search(search_query, sort="new", limit=per_sub_limit)
 
-            count = 0
-            for submission in submissions_generator:
-                if count >= self.max_items:
-                    logger.info(f"Reached max_items limit ({self.max_items}) for Reddit submissions.")
-                    break
+                count = 0
+                for submission in submissions_generator:
+                    if count >= per_sub_limit:
+                        logger.info(f"Reached per-subreddit limit ({per_sub_limit}) for r/{subreddit_name}.")
+                        break
 
-                logger.info(f"Processing submission via search: {submission.title}")
-                reddit_url = f"https://www.reddit.com{submission.permalink}"
-                full_feedback_text = f"{submission.title}\n\n{submission.selftext}"
+                    logger.info(f"Processing submission via search: {submission.title}")
+                    reddit_url = f"https://www.reddit.com{submission.permalink}"
+                    full_feedback_text = f"{submission.title}\n\n{submission.selftext}"
 
-                # Find matched keywords - filter out posts without keyword matches
-                matched_keywords = find_matched_keywords(full_feedback_text, config.KEYWORDS)
+                    matched_keywords = find_matched_keywords(full_feedback_text, config.KEYWORDS)
 
-                if not matched_keywords:
-                    logger.info(f"Skipping submission (no keyword matches): {submission.title}")
-                    continue
+                    if not matched_keywords:
+                        logger.info(f"Skipping submission (no keyword matches): {submission.title}")
+                        continue
 
-                tag_value = self._extract_flair(submission)
+                    tag_value = self._extract_flair(submission)
 
-                # Enhanced categorization
-                enhanced_cat = enhanced_categorize_feedback(
-                    full_feedback_text,
-                    source="Reddit",
-                    scenario="Customer",
-                    organization=f"Reddit/{config.REDDIT_SUBREDDIT}",
-                )
+                    enhanced_cat = enhanced_categorize_feedback(
+                        full_feedback_text,
+                        source="Reddit",
+                        scenario="Customer",
+                        organization=f"Reddit/{subreddit_name}",
+                    )
 
-                feedback_items.append(
-                    {
-                        "Feedback_Gist": generate_feedback_gist(full_feedback_text),
-                        "Feedback": full_feedback_text,
-                        "Matched_Keywords": matched_keywords,
-                        "Url": reddit_url,
-                        "Area": "Workloads",
-                        "Sources": "Reddit",
-                        "Impacttype": self._determine_impact_type_content(submission.title + " " + submission.selftext),
-                        "Scenario": "Customer",
-                        "Customer": str(submission.author) if submission.author else "N/A",
-                        "Tag": tag_value,
-                        "Created": datetime.fromtimestamp(submission.created_utc).isoformat(),
-                        "Organization": f"Reddit/{config.REDDIT_SUBREDDIT}",
-                        "Status": config.DEFAULT_STATUS,
-                        "Created_by": config.SYSTEM_USER,
-                        "Rawfeedback": f"Source URL: {reddit_url}\nRaw Data: {str(vars(submission))}",
-                        "Sentiment": analyze_sentiment(full_feedback_text),
-                        "Category": enhanced_cat["legacy_category"],  # Backward compatibility
-                        "Enhanced_Category": enhanced_cat["primary_category"],
-                        "Subcategory": enhanced_cat["subcategory"],
-                        "Audience": enhanced_cat["audience"],
-                        "Priority": enhanced_cat["priority"],
-                        "Feature_Area": enhanced_cat["feature_area"],
-                        "Categorization_Confidence": enhanced_cat["confidence"],
-                        "Domains": enhanced_cat.get("domains", []),
-                        "Primary_Domain": enhanced_cat.get("primary_domain", None),
-                    }
-                )
-                count += 1
+                    feedback_items.append(
+                        {
+                            "Feedback_Gist": generate_feedback_gist(full_feedback_text),
+                            "Feedback": full_feedback_text,
+                            "Matched_Keywords": matched_keywords,
+                            "Url": reddit_url,
+                            "Area": "SQL Data Virtualization",
+                            "Sources": "Reddit",
+                            "Impacttype": self._determine_impact_type_content(submission.title + " " + submission.selftext),
+                            "Scenario": "Customer",
+                            "Customer": str(submission.author) if submission.author else "N/A",
+                            "Tag": tag_value,
+                            "Created": datetime.fromtimestamp(submission.created_utc).isoformat(),
+                            "Organization": f"Reddit/{subreddit_name}",
+                            "Status": config.DEFAULT_STATUS,
+                            "Created_by": config.SYSTEM_USER,
+                            "Rawfeedback": f"Source URL: {reddit_url}\nSubreddit: r/{subreddit_name}\nScore: {submission.score}\nNum Comments: {submission.num_comments}",
+                            "Sentiment": analyze_sentiment(full_feedback_text),
+                            "Category": enhanced_cat["legacy_category"],
+                            "Enhanced_Category": enhanced_cat["primary_category"],
+                            "Subcategory": enhanced_cat["subcategory"],
+                            "Audience": enhanced_cat["audience"],
+                            "Priority": enhanced_cat["priority"],
+                            "Feature_Area": enhanced_cat["feature_area"],
+                            "Categorization_Confidence": enhanced_cat["confidence"],
+                            "Domains": enhanced_cat.get("domains", []),
+                            "Primary_Domain": enhanced_cat.get("primary_domain", None),
+                            "Score": submission.score,
+                            "Num_Comments": submission.num_comments,
+                        }
+                    )
+                    count += 1
 
-            logger.info(f"Collected {len(feedback_items)} feedback items from Reddit")
+            logger.info(f"Collected {len(feedback_items)} feedback items from Reddit ({len(self.subreddits)} subreddits)")
             return feedback_items[: self.max_items]
 
         except Exception as e:
@@ -202,6 +210,9 @@ class FabricCommunityCollector:
         self.session.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
+
+    def close(self):
+        self.session.close()
 
     def configure(self, settings: Dict[str, Any]):
         """Configure collector with custom settings"""
@@ -505,6 +516,9 @@ class GitHubDiscussionsCollector:
         self.owner = config.GITHUB_REPO_OWNER
         self.repo = config.GITHUB_REPO_NAME
 
+    def close(self):
+        self.session.close()
+
     def configure(self, settings: Dict[str, Any]):
         """Allow configuration override from API"""
         if "owner" in settings:
@@ -636,6 +650,9 @@ class GitHubIssuesCollector:
         }
         self.owner = config.GITHUB_REPO_OWNER
         self.repo = config.GITHUB_REPO_NAME
+
+    def close(self):
+        self.session.close()
 
     def configure(self, settings: Dict[str, Any]):
         """Allow configuration override from API"""
@@ -944,7 +961,7 @@ class ADOChildTasksCollector:
             result = call_mcp_tool("ado-tools", "get_task_details", {"taskIdOrUrl": work_item_id})
             return result if result else {}
         except Exception as e:
-            logger.error(f"Error getting work item details for {work_item_id}: {e}")
+            logger.error(f"Error getting work item details for {work_item_id}: {e}", exc_info=True)
             return {}
 
     def _get_child_tasks(self, parent_work_item_id: str) -> List[Dict[str, Any]]:
@@ -961,7 +978,7 @@ class ADOChildTasksCollector:
             return []
 
         except Exception as e:
-            logger.error(f"Error getting related work items for {parent_work_item_id}: {e}")
+            logger.error(f"Error getting related work items for {parent_work_item_id}: {e}", exc_info=True)
             return []
 
     def _is_newer_date(self, date1: str, date2: str) -> bool:
@@ -987,3 +1004,469 @@ class ADOChildTasksCollector:
         if any(word in content_lower for word in ["test", "verify", "validate", "qa"]):
             return "Testing"
         return "Task"
+
+
+class StackOverflowCollector:
+    """Collects questions from Stack Overflow and DBA Stack Exchange via the Stack Exchange API."""
+
+    def __init__(self, site="stackoverflow"):
+        self.source_name = f"Stack Overflow" if site == "stackoverflow" else "DBA Stack Exchange"
+        self.site = site
+        self.api_base = getattr(config, "STACKEXCHANGE_API_BASE", "https://api.stackexchange.com/2.3")
+        self.max_items = config.MAX_ITEMS_PER_RUN
+        self.session = requests.Session()
+        self.session.headers = {
+            "User-Agent": "FeedbackCollector/1.0",
+            "Accept": "application/json",
+        }
+
+    def close(self):
+        self.session.close()
+
+    def configure(self, settings: Dict[str, Any]):
+        if "max_items" in settings:
+            self.max_items = settings["max_items"]
+            logger.info(f"{self.source_name} configured with max_items={self.max_items}")
+        if "site" in settings:
+            self.site = settings["site"]
+
+    def collect(self) -> List[Dict[str, Any]]:
+        feedback_items = []
+        keywords_to_use = config.KEYWORDS
+
+        if not keywords_to_use:
+            logger.warning(f"{self.source_name}: No keywords configured, skipping.")
+            return []
+
+        # Stack Exchange API: search with intitle for each keyword batch
+        # We'll search tagged with sql-server and use keyword terms
+        tags = "sql-server"
+        query_string = " ".join(keywords_to_use[:10])  # API limits query length
+
+        logger.info(f"Starting {self.source_name} collection with tags={tags}")
+
+        try:
+            page = 1
+            page_size = min(50, self.max_items)
+
+            while len(feedback_items) < self.max_items and page <= 5:
+                params = {
+                    "order": "desc",
+                    "sort": "activity",
+                    "q": query_string,
+                    "tagged": tags,
+                    "site": self.site,
+                    "pagesize": page_size,
+                    "page": page,
+                    "filter": "withbody",
+                }
+
+                url = f"{self.api_base}/search/advanced"
+                logger.info(f"Fetching {self.source_name} page {page}")
+                response = self.session.get(url, params=params, timeout=30)
+                response.raise_for_status()
+
+                data = response.json()
+                items = data.get("items", [])
+
+                if not items:
+                    break
+
+                for item in items:
+                    if len(feedback_items) >= self.max_items:
+                        break
+
+                    title = item.get("title", "")
+                    # Decode HTML entities in title
+                    import html
+                    title = html.unescape(title)
+
+                    body = item.get("body", "")
+                    # Strip HTML tags from body
+                    body_text = BeautifulSoup(body, "html.parser").get_text(separator=" ", strip=True) if body else ""
+
+                    full_text = f"{title}\n\n{body_text}"
+
+                    matched_keywords = find_matched_keywords(full_text, keywords_to_use)
+                    if not matched_keywords:
+                        continue
+
+                    author = item.get("owner", {}).get("display_name", "Anonymous")
+                    created_epoch = item.get("creation_date", 0)
+                    created_dt = datetime.fromtimestamp(created_epoch, tz=timezone.utc).isoformat() if created_epoch else ""
+                    item_url = item.get("link", "")
+                    score = item.get("score", 0)
+                    view_count = item.get("view_count", 0)
+                    answer_count = item.get("answer_count", 0)
+                    is_answered = item.get("is_answered", False)
+
+                    tags_list = item.get("tags", [])
+                    tag_value = ", ".join(tags_list)
+
+                    gist = generate_feedback_gist(full_text)
+
+                    enhanced_cat = enhanced_categorize_feedback(
+                        full_text,
+                        source=self.source_name,
+                        scenario="Customer",
+                        organization=self.source_name,
+                    )
+
+                    feedback_items.append(
+                        {
+                            "Feedback_Gist": gist,
+                            "Feedback": full_text,
+                            "Url": item_url,
+                            "Matched_Keywords": matched_keywords,
+                            "Area": "SQL Data Virtualization",
+                            "Sources": self.source_name,
+                            "Impacttype": self._determine_impact_type(full_text, is_answered),
+                            "Scenario": "Customer",
+                            "Customer": author,
+                            "Tag": tag_value,
+                            "Created": created_dt,
+                            "Organization": self.source_name,
+                            "Status": config.DEFAULT_STATUS,
+                            "Created_by": config.SYSTEM_USER,
+                            "Rawfeedback": json.dumps({
+                                "question_id": item.get("question_id"),
+                                "score": score,
+                                "view_count": view_count,
+                                "answer_count": answer_count,
+                                "is_answered": is_answered,
+                                "tags": tags_list,
+                            }),
+                            "Sentiment": analyze_sentiment(full_text),
+                            "Category": enhanced_cat["legacy_category"],
+                            "Enhanced_Category": enhanced_cat["primary_category"],
+                            "Subcategory": enhanced_cat["subcategory"],
+                            "Audience": enhanced_cat["audience"],
+                            "Priority": enhanced_cat["priority"],
+                            "Feature_Area": enhanced_cat["feature_area"],
+                            "Categorization_Confidence": enhanced_cat["confidence"],
+                            "Domains": enhanced_cat.get("domains", []),
+                            "Primary_Domain": enhanced_cat.get("primary_domain", None),
+                            "Score": score,
+                            "View_Count": view_count,
+                            "Answer_Count": answer_count,
+                        }
+                    )
+
+                has_more = data.get("has_more", False)
+                if not has_more:
+                    break
+                page += 1
+                time.sleep(1)  # Respect rate limits
+
+        except Exception as e:
+            logger.error(f"Error collecting from {self.source_name}: {e}", exc_info=True)
+
+        logger.info(f"Collected {len(feedback_items)} items from {self.source_name}")
+        return feedback_items[: self.max_items]
+
+    def _determine_impact_type(self, content: str, is_answered: bool) -> str:
+        content_lower = content.lower()
+        if any(w in content_lower for w in ["error", "bug", "exception", "crash", "fail"]):
+            return "Bug"
+        if any(w in content_lower for w in ["how to", "how do i", "how can i", "is it possible"]):
+            return "Question"
+        if any(w in content_lower for w in ["suggest", "feature", "request", "would be nice"]):
+            return "Feature Request"
+        if any(w in content_lower for w in ["slow", "performance", "timeout", "takes long"]):
+            return "Performance"
+        if any(w in content_lower for w in ["not supported", "unsupported", "doesn't support", "cannot use"]):
+            return "Unsupported Feature"
+        return "Question"
+
+
+class MicrosoftQandACollector:
+    """Collects questions from Microsoft Q&A (learn.microsoft.com/answers)."""
+
+    def __init__(self):
+        self.source_name = "Microsoft Q&A"
+        self.base_url = "https://learn.microsoft.com/en-us/answers/search"
+        self.api_url = "https://learn.microsoft.com/api/answers/search"
+        self.max_items = config.MAX_ITEMS_PER_RUN
+        self.session = requests.Session()
+        self.session.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+
+    def close(self):
+        self.session.close()
+
+    def configure(self, settings: Dict[str, Any]):
+        if "max_items" in settings:
+            self.max_items = settings["max_items"]
+            logger.info(f"MicrosoftQandACollector configured with max_items={self.max_items}")
+
+    def collect(self) -> List[Dict[str, Any]]:
+        feedback_items = []
+        keywords_to_use = config.KEYWORDS
+
+        if not keywords_to_use:
+            logger.warning(f"{self.source_name}: No keywords configured, skipping.")
+            return []
+
+        # Search for each keyword group
+        query_string = " OR ".join([f'"{k}"' for k in keywords_to_use[:8]])
+        logger.info(f"Starting {self.source_name} collection with query: {query_string[:100]}...")
+
+        try:
+            # Scrape the search results page
+            params = {
+                "q": query_string,
+                "product": "sql-server",
+            }
+
+            for page_num in range(1, 4):  # Max 3 pages
+                if len(feedback_items) >= self.max_items:
+                    break
+
+                params["page"] = page_num
+                logger.info(f"Fetching {self.source_name} page {page_num}")
+
+                response = self.session.get(self.base_url, params=params, timeout=30)
+                response.raise_for_status()
+
+                soup = BeautifulSoup(response.content, "html.parser")
+
+                # Find search result items
+                result_items = soup.select("div.search-result, li.search-result-item, article.result")
+
+                if not result_items:
+                    # Try alternate selectors
+                    result_items = soup.select("div[data-bi-name='search-result']")
+
+                if not result_items:
+                    logger.info(f"No results found on {self.source_name} page {page_num}")
+                    break
+
+                for result in result_items:
+                    if len(feedback_items) >= self.max_items:
+                        break
+
+                    title_elem = result.select_one("a h3, h3 a, a.result-title")
+                    link_elem = result.select_one("a[href]")
+                    snippet_elem = result.select_one("p.search-result-description, div.result-snippet, p")
+
+                    if not title_elem or not link_elem:
+                        continue
+
+                    title = title_elem.get_text(strip=True)
+                    url_path = link_elem.get("href", "")
+                    if url_path and not url_path.startswith("http"):
+                        url_path = f"https://learn.microsoft.com{url_path}"
+                    snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
+
+                    full_text = f"{title}\n\n{snippet}"
+
+                    matched_keywords = find_matched_keywords(full_text, keywords_to_use)
+                    if not matched_keywords:
+                        continue
+
+                    gist = generate_feedback_gist(full_text)
+
+                    enhanced_cat = enhanced_categorize_feedback(
+                        full_text,
+                        source=self.source_name,
+                        scenario="Customer",
+                        organization="Microsoft Q&A",
+                    )
+
+                    feedback_items.append(
+                        {
+                            "Feedback_Gist": gist,
+                            "Feedback": full_text,
+                            "Url": url_path,
+                            "Matched_Keywords": matched_keywords,
+                            "Area": "SQL Data Virtualization",
+                            "Sources": self.source_name,
+                            "Impacttype": self._determine_impact_type(full_text),
+                            "Scenario": "Customer",
+                            "Customer": "Microsoft Q&A User",
+                            "Tag": "microsoft-qa",
+                            "Created": datetime.now(timezone.utc).isoformat(),
+                            "Organization": "Microsoft Q&A",
+                            "Status": config.DEFAULT_STATUS,
+                            "Created_by": config.SYSTEM_USER,
+                            "Rawfeedback": json.dumps({"title": title, "url": url_path, "snippet": snippet}),
+                            "Sentiment": analyze_sentiment(full_text),
+                            "Category": enhanced_cat["legacy_category"],
+                            "Enhanced_Category": enhanced_cat["primary_category"],
+                            "Subcategory": enhanced_cat["subcategory"],
+                            "Audience": enhanced_cat["audience"],
+                            "Priority": enhanced_cat["priority"],
+                            "Feature_Area": enhanced_cat["feature_area"],
+                            "Categorization_Confidence": enhanced_cat["confidence"],
+                            "Domains": enhanced_cat.get("domains", []),
+                            "Primary_Domain": enhanced_cat.get("primary_domain", None),
+                        }
+                    )
+
+                time.sleep(1.5)
+
+        except Exception as e:
+            logger.error(f"Error collecting from {self.source_name}: {e}", exc_info=True)
+
+        logger.info(f"Collected {len(feedback_items)} items from {self.source_name}")
+        return feedback_items[: self.max_items]
+
+    def _determine_impact_type(self, content: str) -> str:
+        content_lower = content.lower()
+        if any(w in content_lower for w in ["error", "bug", "exception", "crash", "fail"]):
+            return "Bug"
+        if any(w in content_lower for w in ["suggest", "feature", "request", "enhance"]):
+            return "Feature Request"
+        if any(w in content_lower for w in ["not supported", "unsupported", "cannot", "doesn't work"]):
+            return "Unsupported Feature"
+        return "Question"
+
+
+class TechCommunityCollector:
+    """Collects blog posts and discussions from Microsoft Tech Community."""
+
+    def __init__(self):
+        self.source_name = "Tech Community"
+        self.search_url = "https://techcommunity.microsoft.com/t5/forums/searchpage/tab/message"
+        self.max_items = config.MAX_ITEMS_PER_RUN
+        self.session = requests.Session()
+        self.session.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        }
+
+    def close(self):
+        self.session.close()
+
+    def configure(self, settings: Dict[str, Any]):
+        if "max_items" in settings:
+            self.max_items = settings["max_items"]
+            logger.info(f"TechCommunityCollector configured with max_items={self.max_items}")
+
+    def collect(self) -> List[Dict[str, Any]]:
+        feedback_items = []
+        keywords_to_use = config.KEYWORDS
+
+        if not keywords_to_use:
+            logger.warning(f"{self.source_name}: No keywords configured, skipping.")
+            return []
+
+        query_string = " OR ".join([f'"{k}"' for k in keywords_to_use[:8]])
+        logger.info(f"Starting {self.source_name} collection")
+
+        try:
+            for page_num in range(1, 4):  # Max 3 pages
+                if len(feedback_items) >= self.max_items:
+                    break
+
+                params = {
+                    "q": query_string,
+                    "collapse_discussion": "true",
+                    "search_type": "thread",
+                    "search_page_size": "25",
+                    "page": str(page_num),
+                }
+
+                logger.info(f"Fetching {self.source_name} page {page_num}")
+                response = self.session.get(self.search_url, params=params, timeout=30)
+                response.raise_for_status()
+
+                soup = BeautifulSoup(response.content, "html.parser")
+
+                search_items = soup.select("div.lia-message-view-message-search-item")
+
+                if not search_items:
+                    logger.info(f"No results on {self.source_name} page {page_num}")
+                    break
+
+                for item_elem in search_items:
+                    if len(feedback_items) >= self.max_items:
+                        break
+
+                    title_tag = item_elem.select_one("h2.message-subject a.page-link")
+                    author_tag = item_elem.select_one("span.lia-message-byline a.lia-user-name-link")
+                    body_tag = item_elem.select_one("div.lia-truncated-body-container")
+
+                    date_span = item_elem.select_one("div.lia-message-post-date span.local-date")
+
+                    if not title_tag or not title_tag.has_attr("href"):
+                        continue
+
+                    title = title_tag.get_text(strip=True)
+                    thread_url = title_tag["href"]
+                    if not thread_url.startswith("http"):
+                        thread_url = f"https://techcommunity.microsoft.com{thread_url}"
+                    thread_url = thread_url.split("?")[0]
+
+                    author = author_tag.get_text(strip=True) if author_tag else "Unknown"
+                    body_preview = body_tag.get_text(separator=" ", strip=True) if body_tag else ""
+                    date_text = date_span.get_text(strip=True) if date_span else ""
+
+                    full_text = f"{title}\n\n{body_preview}" if body_preview else title
+
+                    matched_keywords = find_matched_keywords(full_text, keywords_to_use)
+                    if not matched_keywords:
+                        continue
+
+                    gist = generate_feedback_gist(full_text)
+
+                    enhanced_cat = enhanced_categorize_feedback(
+                        full_text,
+                        source=self.source_name,
+                        scenario="Customer",
+                        organization="Microsoft Tech Community",
+                    )
+
+                    feedback_items.append(
+                        {
+                            "Feedback_Gist": gist,
+                            "Feedback": full_text,
+                            "Url": thread_url,
+                            "Matched_Keywords": matched_keywords,
+                            "Area": "SQL Data Virtualization",
+                            "Sources": self.source_name,
+                            "Impacttype": self._determine_impact_type(full_text),
+                            "Scenario": "Customer",
+                            "Customer": author,
+                            "Tag": "techcommunity",
+                            "Created": datetime.now(timezone.utc).isoformat(),
+                            "Organization": "Microsoft Tech Community",
+                            "Status": config.DEFAULT_STATUS,
+                            "Created_by": config.SYSTEM_USER,
+                            "Rawfeedback": json.dumps({
+                                "title": title,
+                                "url": thread_url,
+                                "author": author,
+                                "date_text": date_text,
+                            }),
+                            "Sentiment": analyze_sentiment(full_text),
+                            "Category": enhanced_cat["legacy_category"],
+                            "Enhanced_Category": enhanced_cat["primary_category"],
+                            "Subcategory": enhanced_cat["subcategory"],
+                            "Audience": enhanced_cat["audience"],
+                            "Priority": enhanced_cat["priority"],
+                            "Feature_Area": enhanced_cat["feature_area"],
+                            "Categorization_Confidence": enhanced_cat["confidence"],
+                            "Domains": enhanced_cat.get("domains", []),
+                            "Primary_Domain": enhanced_cat.get("primary_domain", None),
+                        }
+                    )
+
+                time.sleep(1.5)
+
+        except Exception as e:
+            logger.error(f"Error collecting from {self.source_name}: {e}", exc_info=True)
+
+        logger.info(f"Collected {len(feedback_items)} items from {self.source_name}")
+        return feedback_items[: self.max_items]
+
+    def _determine_impact_type(self, content: str) -> str:
+        content_lower = content.lower()
+        if any(w in content_lower for w in ["error", "bug", "issue", "problem"]):
+            return "Bug"
+        if any(w in content_lower for w in ["suggest", "feature", "improve"]):
+            return "Feature Request"
+        if any(w in content_lower for w in ["how to", "question", "help"]):
+            return "Question"
+        return "Feedback"

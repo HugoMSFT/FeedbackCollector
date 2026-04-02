@@ -3,11 +3,12 @@ import pandas as pd
 import os
 import logging
 import time
+import threading
 from datetime import datetime
 from typing import Dict, Any
 import json
 
-from collectors import RedditCollector, FabricCommunityCollector, GitHubDiscussionsCollector, GitHubIssuesCollector
+from collectors import RedditCollector, FabricCommunityCollector, GitHubDiscussionsCollector, GitHubIssuesCollector, StackOverflowCollector, MicrosoftQandACollector, TechCommunityCollector
 from ado_client import get_working_ado_items
 import config
 import utils
@@ -18,10 +19,18 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__, template_folder=TEMPLATES_DIR, static_folder=STATIC_DIR)
-app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-key-change-in-production")
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB max request size
+_secret_key = os.getenv("FLASK_SECRET_KEY")
+if not _secret_key:
+    logger.warning("FLASK_SECRET_KEY not set – using insecure dev key. Set it in production!")
+    _secret_key = "dev-key-change-in-production"
+app.secret_key = _secret_key
+
+# Lock protecting mutable global state that is read/written by concurrent requests
+_state_lock = threading.Lock()
 
 last_collected_feedback = []
-last_collection_summary = {"reddit": 0, "fabric": 0, "github": 0, "github_issues": 0, "total": 0}
+last_collection_summary = {"reddit": 0, "fabric": 0, "github": 0, "github_issues": 0, "stackoverflow": 0, "dba_stackexchange": 0, "msqa": 0, "techcommunity": 0, "total": 0}
 
 # Collection progress tracking
 collection_status = {
@@ -61,17 +70,15 @@ def load_latest_feedback_from_csv():
         feedback_items = df.to_dict("records")
 
         # Parse Matched_Keywords from string to list
-        import ast
-
         for item in feedback_items:
             if "Matched_Keywords" in item:
                 try:
                     # Convert string representation of list back to actual list
                     if isinstance(item["Matched_Keywords"], str):
-                        item["Matched_Keywords"] = ast.literal_eval(item["Matched_Keywords"])
+                        item["Matched_Keywords"] = json.loads(item["Matched_Keywords"])
                     elif pd.isna(item["Matched_Keywords"]):
                         item["Matched_Keywords"] = []
-                except (ValueError, SyntaxError):
+                except (ValueError, json.JSONDecodeError):
                     item["Matched_Keywords"] = []
 
         logger.info(f"Loaded {len(feedback_items)} items from CSV")
@@ -108,7 +115,10 @@ def manage_keywords_route():
             if data is None or "keywords" not in data or not isinstance(data["keywords"], list):
                 return jsonify({"status": "error", "message": "Invalid keywords data. Expected a list."}), 400
 
-            valid_keywords = [str(k).strip() for k in data["keywords"] if str(k).strip()]
+            if len(data["keywords"]) > 500:
+                return jsonify({"status": "error", "message": "Too many keywords (max 500)."}), 400
+
+            valid_keywords = [str(k).strip()[:200] for k in data["keywords"] if str(k).strip()]
 
             config.save_keywords(valid_keywords)
             config.KEYWORDS = valid_keywords.copy()
@@ -379,24 +389,27 @@ def restore_default_impact_types_route():
 def collect_feedback_route():
     """Enhanced collection route with source configuration support"""
     global last_collected_feedback, last_collection_summary, collection_status
-    last_collected_feedback = []
+
+    with _state_lock:
+        last_collected_feedback = []
 
     logger.info("🚀 COLLECTION STARTED: Beginning feedback collection process")
 
     # Completely reset collection status to running (clears all old values)
-    collection_status.clear()
-    collection_status.update(
-        {
-            "status": "running",
-            "message": "Collection in progress...",
-            "start_time": datetime.now().isoformat(),
-            "end_time": None,
-            "total_items": 0,
-            "current_source": "Initializing",
-            "sources_completed": [],
-            "error_message": None,
-            "progress": 0,
-            "source_counts": {},
+    with _state_lock:
+        collection_status.clear()
+        collection_status.update(
+            {
+                "status": "running",
+                "message": "Collection in progress...",
+                "start_time": datetime.now().isoformat(),
+                "end_time": None,
+                "total_items": 0,
+                "current_source": "Initializing",
+                "sources_completed": [],
+                "error_message": None,
+                "progress": 0,
+                "source_counts": {},
         }
     )
 
@@ -490,13 +503,18 @@ def collect_feedback_route():
         github_feedback = []
         github_issues_feedback = []
         ado_feedback = []
+        stackoverflow_feedback = []
+        dba_stackexchange_feedback = []
+        msqa_feedback = []
+        techcommunity_feedback = []
 
         # Collect from Reddit if enabled
         if source_configs.get("reddit", {}).get("enabled", False):
             collection_status["current_source"] = "Reddit"
             collection_status["message"] = "Collecting from Reddit..."
             reddit_config = source_configs["reddit"]
-            logger.info(f"🔴 REDDIT: Collecting from r/{reddit_config.get('subreddit', 'MicrosoftFabric')}")
+            subreddits = reddit_config.get("subreddits", [reddit_config.get("subreddit", "SQLServer")])
+            logger.info(f"🔴 REDDIT: Collecting from {subreddits}")
 
             reddit_collector = RedditCollector()
 
@@ -504,7 +522,7 @@ def collect_feedback_route():
             if hasattr(reddit_collector, "configure"):
                 reddit_collector.configure(
                     {
-                        "subreddit": reddit_config.get("subreddit", "MicrosoftFabric"),
+                        "subreddits": subreddits,
                         "sort": reddit_config.get("sort", "new"),
                         "time_filter": reddit_config.get("timeFilter", "month"),
                         "max_items": reddit_config.get("maxItems", 200),
@@ -536,6 +554,7 @@ def collect_feedback_route():
                 fabric_collector.configure({"max_items": fabric_config.get("maxItems", 200)})
 
             fabric_feedback = fabric_collector.collect()
+            fabric_collector.close()
             logger.info(f"Fabric Community collector found {len(fabric_feedback)} items.")
             collection_status["sources_completed"].append("Fabric Community")
             if total_sources > 0:
@@ -593,6 +612,7 @@ def collect_feedback_route():
                     )
 
                 repo_feedback = github_collector.collect()
+                github_collector.close()
                 logger.info(f"  ✓ Found {len(repo_feedback)} items from {repo_owner}/{repo_name}")
                 github_feedback.extend(repo_feedback)
 
@@ -649,6 +669,7 @@ def collect_feedback_route():
                 )
 
                 repo_feedback = github_issues_collector.collect()
+                github_issues_collector.close()
                 logger.info(f"  ✓ Found {len(repo_feedback)} items from {repo_owner}/{repo_name}")
                 github_issues_feedback.extend(repo_feedback)
 
@@ -771,6 +792,90 @@ def collect_feedback_route():
             for item in ado_feedback[:3]:
                 logger.info(f"  - {item['Title']} | URL: {item['URL']}")
 
+        # Collect from Stack Overflow if enabled
+        if source_configs.get("stackoverflow", {}).get("enabled", False):
+            collection_status["current_source"] = "Stack Overflow"
+            collection_status["message"] = "Collecting from Stack Overflow..."
+            so_config = source_configs["stackoverflow"]
+            logger.info("📚 STACK OVERFLOW: Collecting feedback")
+
+            so_collector = StackOverflowCollector(site="stackoverflow")
+            so_collector.configure({"max_items": so_config.get("maxItems", 200)})
+
+            stackoverflow_feedback = so_collector.collect()
+            so_collector.close()
+            logger.info(f"Stack Overflow collector found {len(stackoverflow_feedback)} items.")
+            collection_status["sources_completed"].append("Stack Overflow")
+            if total_sources > 0:
+                collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
+            collection_status["source_counts"] = collection_status.get("source_counts", {})
+            collection_status["source_counts"]["stackoverflow"] = len(stackoverflow_feedback)
+            all_feedback.extend(stackoverflow_feedback)
+            results["stackoverflow"] = {"count": len(stackoverflow_feedback), "completed": True}
+
+        # Collect from DBA Stack Exchange if enabled
+        if source_configs.get("dbaStackExchange", {}).get("enabled", False):
+            collection_status["current_source"] = "DBA Stack Exchange"
+            collection_status["message"] = "Collecting from DBA Stack Exchange..."
+            dba_config = source_configs["dbaStackExchange"]
+            logger.info("🗄️ DBA STACK EXCHANGE: Collecting feedback")
+
+            dba_collector = StackOverflowCollector(site="dba")
+            dba_collector.configure({"max_items": dba_config.get("maxItems", 200)})
+
+            dba_stackexchange_feedback = dba_collector.collect()
+            dba_collector.close()
+            logger.info(f"DBA Stack Exchange collector found {len(dba_stackexchange_feedback)} items.")
+            collection_status["sources_completed"].append("DBA Stack Exchange")
+            if total_sources > 0:
+                collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
+            collection_status["source_counts"] = collection_status.get("source_counts", {})
+            collection_status["source_counts"]["dbaStackExchange"] = len(dba_stackexchange_feedback)
+            all_feedback.extend(dba_stackexchange_feedback)
+            results["dbaStackExchange"] = {"count": len(dba_stackexchange_feedback), "completed": True}
+
+        # Collect from Microsoft Q&A if enabled
+        if source_configs.get("microsoftQA", {}).get("enabled", False):
+            collection_status["current_source"] = "Microsoft Q&A"
+            collection_status["message"] = "Collecting from Microsoft Q&A..."
+            msqa_config = source_configs["microsoftQA"]
+            logger.info("❓ MICROSOFT Q&A: Collecting feedback")
+
+            msqa_collector = MicrosoftQandACollector()
+            msqa_collector.configure({"max_items": msqa_config.get("maxItems", 200)})
+
+            msqa_feedback = msqa_collector.collect()
+            msqa_collector.close()
+            logger.info(f"Microsoft Q&A collector found {len(msqa_feedback)} items.")
+            collection_status["sources_completed"].append("Microsoft Q&A")
+            if total_sources > 0:
+                collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
+            collection_status["source_counts"] = collection_status.get("source_counts", {})
+            collection_status["source_counts"]["microsoftQA"] = len(msqa_feedback)
+            all_feedback.extend(msqa_feedback)
+            results["microsoftQA"] = {"count": len(msqa_feedback), "completed": True}
+
+        # Collect from Tech Community if enabled
+        if source_configs.get("techCommunity", {}).get("enabled", False):
+            collection_status["current_source"] = "Tech Community"
+            collection_status["message"] = "Collecting from Microsoft Tech Community..."
+            tc_config = source_configs["techCommunity"]
+            logger.info("💬 TECH COMMUNITY: Collecting feedback")
+
+            tc_collector = TechCommunityCollector()
+            tc_collector.configure({"max_items": tc_config.get("maxItems", 200)})
+
+            techcommunity_feedback = tc_collector.collect()
+            tc_collector.close()
+            logger.info(f"Tech Community collector found {len(techcommunity_feedback)} items.")
+            collection_status["sources_completed"].append("Tech Community")
+            if total_sources > 0:
+                collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
+            collection_status["source_counts"] = collection_status.get("source_counts", {})
+            collection_status["source_counts"]["techCommunity"] = len(techcommunity_feedback)
+            all_feedback.extend(techcommunity_feedback)
+            results["techCommunity"] = {"count": len(techcommunity_feedback), "completed": True}
+
         # Apply sentiment analysis to all feedback sources
         def add_sentiment_to_feedback(feedback_list, source_name):
             for item in feedback_list:
@@ -793,11 +898,15 @@ def collect_feedback_route():
         fabric_feedback = add_sentiment_to_feedback(fabric_feedback, "Fabric Community")
         github_feedback = add_sentiment_to_feedback(github_feedback, "GitHub Discussions")
         github_issues_feedback = add_sentiment_to_feedback(github_issues_feedback, "GitHub Issues")
+        stackoverflow_feedback = add_sentiment_to_feedback(stackoverflow_feedback, "Stack Overflow")
+        dba_stackexchange_feedback = add_sentiment_to_feedback(dba_stackexchange_feedback, "DBA Stack Exchange")
+        msqa_feedback = add_sentiment_to_feedback(msqa_feedback, "Microsoft Q&A")
+        techcommunity_feedback = add_sentiment_to_feedback(techcommunity_feedback, "Tech Community")
 
         # Note: all_feedback was already built by extending with each source
         # No need to combine again as it would lose the items
         logger.info(
-            f"Final feedback counts: Reddit={len(reddit_feedback)}, Fabric={len(fabric_feedback)}, GitHub Discussions={len(github_feedback)}, GitHub Issues={len(github_issues_feedback)}, ADO={len(ado_feedback)}, Total={len(all_feedback)}"
+            f"Final feedback counts: Reddit={len(reddit_feedback)}, Fabric={len(fabric_feedback)}, GitHub Discussions={len(github_feedback)}, GitHub Issues={len(github_issues_feedback)}, ADO={len(ado_feedback)}, SO={len(stackoverflow_feedback)}, DBA.SE={len(dba_stackexchange_feedback)}, MSQA={len(msqa_feedback)}, TechCommunity={len(techcommunity_feedback)}, Total={len(all_feedback)}"
         )
 
         # Generate deterministic IDs for all feedback items BEFORE state initialization
@@ -842,6 +951,10 @@ def collect_feedback_route():
             "github": {"count": len(github_feedback), "completed": True},
             "github_issues": {"count": len(github_issues_feedback), "completed": True},
             "ado": {"count": len(ado_feedback), "completed": True},
+            "stackoverflow": {"count": len(stackoverflow_feedback), "completed": True},
+            "dba_stackexchange": {"count": len(dba_stackexchange_feedback), "completed": True},
+            "microsoftQA": {"count": len(msqa_feedback), "completed": True},
+            "techCommunity": {"count": len(techcommunity_feedback), "completed": True},
             "total": len(all_feedback),
         }
         logger.info(f"Total feedback items collected: {len(all_feedback)}")
@@ -2317,23 +2430,22 @@ def collection_progress():
 def get_collection_status():
     """Get current collection operation status for badge synchronization"""
     try:
-        global collection_status
-
-        # Return current collection status
-        return jsonify(
-            {
-                "status": collection_status["status"],
-                "message": collection_status["message"],
-                "start_time": collection_status["start_time"],
-                "end_time": collection_status["end_time"],
-                "total_items": collection_status["total_items"],
-                "current_source": collection_status["current_source"],
-                "sources_completed": collection_status["sources_completed"],
-                "error_message": collection_status["error_message"],
-                "source_counts": collection_status.get("source_counts", {}),
-                "progress": collection_status.get("progress", 0),
-            }
-        )
+        with _state_lock:
+            # Return a snapshot of current collection status
+            return jsonify(
+                {
+                    "status": collection_status.get("status", "ready"),
+                    "message": collection_status.get("message", ""),
+                    "start_time": collection_status.get("start_time"),
+                    "end_time": collection_status.get("end_time"),
+                    "total_items": collection_status.get("total_items", 0),
+                    "current_source": collection_status.get("current_source"),
+                    "sources_completed": list(collection_status.get("sources_completed", [])),
+                    "error_message": collection_status.get("error_message"),
+                    "source_counts": dict(collection_status.get("source_counts", {})),
+                    "progress": collection_status.get("progress", 0),
+                }
+            )
 
     except Exception as e:
         logger.error(f"Error checking collection status: {e}")
@@ -3224,11 +3336,15 @@ def download_csv(filename):
     """Serve CSV files from the data directory"""
     try:
         # Validate filename to prevent directory traversal attacks
+        if os.path.sep in filename or "/" in filename or ".." in filename:
+            return jsonify({"error": "Invalid filename"}), 400
         if not filename.startswith("feedback_") or not filename.endswith(".csv"):
             return jsonify({"error": "Invalid filename"}), 400
 
-        # Construct the full path to the CSV file
-        filepath = os.path.join(DATA_DIR, filename)
+        # Construct the full path and verify it stays within DATA_DIR
+        filepath = os.path.realpath(os.path.join(DATA_DIR, filename))
+        if not filepath.startswith(os.path.realpath(DATA_DIR)):
+            return jsonify({"error": "Invalid filename"}), 400
 
         # Check if file exists
         if not os.path.exists(filepath):
@@ -3240,3 +3356,239 @@ def download_csv(filename):
     except Exception as e:
         logger.error(f"Error serving CSV file {filename}: {e}")
         return jsonify({"error": "Error serving file"}), 500
+
+
+@app.route("/api/insights/topic-aggregation")
+def topic_aggregation():
+    """Aggregate feedback by topic/keyword and rank by frequency."""
+    global last_collected_feedback
+
+    feedback = last_collected_feedback
+    if not feedback:
+        feedback = load_latest_feedback_from_csv()
+
+    if not feedback:
+        return jsonify({"topics": [], "message": "No feedback data available"})
+
+    # Aggregate by matched keywords
+    keyword_stats = {}
+    for item in feedback:
+        matched = item.get("Matched_Keywords", [])
+        if isinstance(matched, str):
+            try:
+                import ast
+                matched = ast.literal_eval(matched)
+            except (ValueError, SyntaxError):
+                matched = [matched] if matched else []
+
+        sentiment = item.get("Sentiment", "Neutral")
+        impact = item.get("Impacttype", "Feedback")
+        source = item.get("Sources", "Unknown")
+        score = item.get("Score", 0) or 0
+        view_count = item.get("View_Count", 0) or 0
+
+        for kw in matched:
+            if kw not in keyword_stats:
+                keyword_stats[kw] = {
+                    "keyword": kw,
+                    "count": 0,
+                    "sentiments": {"Positive": 0, "Negative": 0, "Neutral": 0},
+                    "impact_types": {},
+                    "sources": {},
+                    "total_score": 0,
+                    "total_views": 0,
+                    "sample_urls": [],
+                }
+            stats = keyword_stats[kw]
+            stats["count"] += 1
+            stats["sentiments"][sentiment] = stats["sentiments"].get(sentiment, 0) + 1
+            stats["impact_types"][impact] = stats["impact_types"].get(impact, 0) + 1
+            stats["sources"][source] = stats["sources"].get(source, 0) + 1
+            stats["total_score"] += int(score) if score else 0
+            stats["total_views"] += int(view_count) if view_count else 0
+            if len(stats["sample_urls"]) < 3:
+                url = item.get("Url", "")
+                if url and url not in stats["sample_urls"]:
+                    stats["sample_urls"].append(url)
+
+    # Sort by frequency
+    topics = sorted(keyword_stats.values(), key=lambda x: x["count"], reverse=True)
+
+    # Calculate complaint ratio for priority
+    for topic in topics:
+        total = topic["count"]
+        negative = topic["sentiments"].get("Negative", 0)
+        bugs = topic["impact_types"].get("Bug", 0)
+        topic["complaint_ratio"] = round((negative + bugs) / max(total, 1), 2)
+        topic["popularity_score"] = topic["count"] + (topic["total_score"] // 10) + (topic["total_views"] // 100)
+
+    # Re-sort by popularity score
+    topics.sort(key=lambda x: x["popularity_score"], reverse=True)
+
+    return jsonify({"topics": topics, "total_feedback": len(feedback)})
+
+
+@app.route("/api/insights/summary")
+def insights_summary():
+    """Generate an executive summary of collected feedback with actionable insights."""
+    global last_collected_feedback
+
+    feedback = last_collected_feedback
+    if not feedback:
+        feedback = load_latest_feedback_from_csv()
+
+    if not feedback:
+        return jsonify({"summary": None, "message": "No feedback data available"})
+
+    total = len(feedback)
+
+    # Source breakdown
+    source_counts = {}
+    for item in feedback:
+        src = item.get("Sources", "Unknown")
+        source_counts[src] = source_counts.get(src, 0) + 1
+
+    # Sentiment breakdown
+    sentiment_counts = {"Positive": 0, "Negative": 0, "Neutral": 0}
+    for item in feedback:
+        s = item.get("Sentiment", "Neutral")
+        sentiment_counts[s] = sentiment_counts.get(s, 0) + 1
+
+    # Impact type breakdown
+    impact_counts = {}
+    for item in feedback:
+        imp = item.get("Impacttype", "Feedback")
+        impact_counts[imp] = impact_counts.get(imp, 0) + 1
+
+    # Category breakdown
+    category_counts = {}
+    for item in feedback:
+        cat = item.get("Enhanced_Category", "Uncategorized")
+        category_counts[cat] = category_counts.get(cat, 0) + 1
+
+    # Top complained-about topics (negative sentiment + bugs)
+    complaint_keywords = {}
+    for item in feedback:
+        sentiment = item.get("Sentiment", "Neutral")
+        impact = item.get("Impacttype", "Feedback")
+        if sentiment == "Negative" or impact in ("Bug", "Performance", "Unsupported Feature"):
+            matched = item.get("Matched_Keywords", [])
+            if isinstance(matched, str):
+                try:
+                    import ast
+                    matched = ast.literal_eval(matched)
+                except (ValueError, SyntaxError):
+                    matched = []
+            for kw in matched:
+                complaint_keywords[kw] = complaint_keywords.get(kw, 0) + 1
+
+    top_complaints = sorted(complaint_keywords.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    # Feature request topics
+    feature_keywords = {}
+    for item in feedback:
+        if item.get("Impacttype") in ("Feature Request", "Unsupported Feature"):
+            matched = item.get("Matched_Keywords", [])
+            if isinstance(matched, str):
+                try:
+                    import ast
+                    matched = ast.literal_eval(matched)
+                except (ValueError, SyntaxError):
+                    matched = []
+            for kw in matched:
+                feature_keywords[kw] = feature_keywords.get(kw, 0) + 1
+
+    top_feature_requests = sorted(feature_keywords.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    # Platform breakdown
+    platform_mentions = {"SQL Server": 0, "Azure SQL Database": 0, "Azure SQL MI": 0, "Fabric SQL": 0}
+    for item in feedback:
+        text = (item.get("Feedback", "") or "").lower()
+        if "sql server" in text and "azure" not in text:
+            platform_mentions["SQL Server"] += 1
+        if "azure sql database" in text or "azure sql db" in text:
+            platform_mentions["Azure SQL Database"] += 1
+        if "managed instance" in text or "azure sql mi" in text:
+            platform_mentions["Azure SQL MI"] += 1
+        if "fabric sql" in text or "fabric database" in text:
+            platform_mentions["Fabric SQL"] += 1
+
+    summary = {
+        "total_feedback": total,
+        "source_breakdown": dict(sorted(source_counts.items(), key=lambda x: x[1], reverse=True)),
+        "sentiment_breakdown": sentiment_counts,
+        "sentiment_ratio": {
+            "positive_pct": round(sentiment_counts["Positive"] / max(total, 1) * 100, 1),
+            "negative_pct": round(sentiment_counts["Negative"] / max(total, 1) * 100, 1),
+            "neutral_pct": round(sentiment_counts["Neutral"] / max(total, 1) * 100, 1),
+        },
+        "impact_breakdown": dict(sorted(impact_counts.items(), key=lambda x: x[1], reverse=True)),
+        "category_breakdown": dict(sorted(category_counts.items(), key=lambda x: x[1], reverse=True)),
+        "top_complaints": [{"keyword": kw, "count": c} for kw, c in top_complaints],
+        "top_feature_requests": [{"keyword": kw, "count": c} for kw, c in top_feature_requests],
+        "platform_mentions": platform_mentions,
+        "actionable_insights": _generate_actionable_insights(
+            total, sentiment_counts, impact_counts, top_complaints, top_feature_requests, platform_mentions
+        ),
+    }
+
+    return jsonify({"summary": summary})
+
+
+def _generate_actionable_insights(total, sentiments, impacts, complaints, features, platforms):
+    """Generate human-readable actionable insights from the data."""
+    insights = []
+
+    # Overall sentiment insight
+    neg_pct = sentiments.get("Negative", 0) / max(total, 1) * 100
+    if neg_pct > 40:
+        insights.append({
+            "priority": "critical",
+            "insight": f"High negative sentiment ({neg_pct:.0f}%) — significant user frustration detected across sources.",
+            "action": "Prioritize addressing the top complaints immediately.",
+        })
+    elif neg_pct > 20:
+        insights.append({
+            "priority": "high",
+            "insight": f"Moderate negative sentiment ({neg_pct:.0f}%) — several pain points need attention.",
+            "action": "Review top complaint areas and plan fixes for the next release.",
+        })
+
+    # Bug insight
+    bug_count = impacts.get("Bug", 0)
+    if bug_count > total * 0.3:
+        insights.append({
+            "priority": "critical",
+            "insight": f"{bug_count} bug reports ({bug_count / max(total, 1) * 100:.0f}% of feedback) indicate quality issues.",
+            "action": "Conduct focused bug triage on the most-mentioned features.",
+        })
+
+    # Feature request insight
+    fr_count = impacts.get("Feature Request", 0) + impacts.get("Unsupported Feature", 0)
+    if fr_count > 0:
+        top_fr = complaints[0][0] if complaints else "N/A"
+        insights.append({
+            "priority": "medium",
+            "insight": f"{fr_count} feature requests/unsupported feature reports. Most requested: '{top_fr}'.",
+            "action": "Evaluate top feature requests for roadmap inclusion.",
+        })
+
+    # Top complaint insight
+    if complaints:
+        top_kw, top_count = complaints[0]
+        insights.append({
+            "priority": "high",
+            "insight": f"'{top_kw}' is the #1 pain point with {top_count} complaints/bug reports.",
+            "action": f"Deep-dive into '{top_kw}' feedback to identify root causes.",
+        })
+
+    # Platform insight
+    most_mentioned = max(platforms.items(), key=lambda x: x[1]) if platforms else ("N/A", 0)
+    if most_mentioned[1] > 0:
+        insights.append({
+            "priority": "medium",
+            "insight": f"'{most_mentioned[0]}' is the most-discussed platform ({most_mentioned[1]} mentions).",
+            "action": f"Ensure feature parity and documentation quality for {most_mentioned[0]}.",
+        })
+
+    return insights

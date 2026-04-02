@@ -17,49 +17,54 @@ def generate_feedback_id() -> str:
 
 def extract_user_from_token(bearer_token: str) -> str:
     """
-    Extract user information from Fabric bearer token.
-    This is a simplified implementation - in production you might want to
-    decode the JWT token properly to get user claims.
+    Extract user information from Fabric bearer token by decoding the JWT payload.
+    NOTE: This only extracts claims for display purposes (user attribution).
+    Actual authentication/authorization is handled by the Fabric SQL connection.
     """
-    try:
-        # For now, we'll use a simple approach
-        # In a real implementation, you'd decode the JWT token
-        # For demonstration, we'll extract a simple identifier
+    if not bearer_token or not isinstance(bearer_token, str):
+        return "Unknown User"
 
+    try:
         # Remove 'Bearer ' prefix if present
         token = bearer_token.replace("Bearer ", "").strip()
 
-        # Try to decode as JWT token (simplified)
-        try:
-            # Split JWT token into parts
-            parts = token.split(".")
-            if len(parts) >= 2:
-                # Decode the payload (second part)
-                # Add padding if needed for base64 decoding
-                payload = parts[1]
-                padding = len(payload) % 4
-                if padding:
-                    payload += "=" * (4 - padding)
+        if not token:
+            return "Unknown User"
 
-                decoded = base64.urlsafe_b64decode(payload)
-                payload_json = json.loads(decoded)
+        # Validate basic JWT structure (three base64url-encoded segments)
+        parts = token.split(".")
+        if len(parts) != 3:
+            logger.debug("Token is not a valid JWT (expected 3 parts)")
+            return f"User-{abs(hash(token)) % 10000}"
 
-                # Try to extract user identifier from common JWT claims
-                user_id = (
-                    payload_json.get("upn")
-                    or payload_json.get("email")
-                    or payload_json.get("preferred_username")
-                    or payload_json.get("name")
-                    or payload_json.get("sub", "Unknown User")
-                )
+        # Decode the payload (second part)
+        payload = parts[1]
+        # Add padding for base64url decoding
+        padding = len(payload) % 4
+        if padding:
+            payload += "=" * (4 - padding)
 
-                return str(user_id)
-        except Exception as e:
-            logger.debug(f"Could not decode JWT token: {e}")
+        decoded = base64.urlsafe_b64decode(payload)
+        payload_json = json.loads(decoded)
 
-        # Fallback: use a hash of the token for consistency
-        return f"User-{abs(hash(token)) % 10000}"
+        if not isinstance(payload_json, dict):
+            logger.debug("JWT payload is not a JSON object")
+            return f"User-{abs(hash(token)) % 10000}"
 
+        # Extract user identifier from common JWT claims
+        user_id = (
+            payload_json.get("upn")
+            or payload_json.get("email")
+            or payload_json.get("preferred_username")
+            or payload_json.get("name")
+            or payload_json.get("sub", "Unknown User")
+        )
+
+        return str(user_id)
+
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError) as e:
+        logger.debug(f"Could not decode JWT token: {e}")
+        return f"User-{abs(hash(bearer_token)) % 10000}"
     except Exception as e:
         logger.error(f"Error extracting user from token: {e}")
         return "Unknown User"
@@ -148,6 +153,7 @@ def get_stored_feedback_ids() -> List[str]:
     Get all Feedback_IDs that are stored in the Fabric SQL database.
     Returns a list of Feedback_IDs that actually exist in the database.
     """
+    conn = None
     try:
         import fabric_sql_writer
 
@@ -173,13 +179,15 @@ def get_stored_feedback_ids() -> List[str]:
         logger.info(f"Found {len(stored_ids)} feedback items stored in Fabric SQL database")
 
         cursor.close()
-        conn.close()
 
         return stored_ids
 
     except Exception as e:
         logger.error(f"Error querying stored feedback IDs from Fabric SQL: {e}")
         return []
+    finally:
+        if conn:
+            conn.close()
 
 
 def get_all_feedback_states() -> Dict[str, Dict[str, Any]]:
@@ -187,6 +195,7 @@ def get_all_feedback_states() -> Dict[str, Dict[str, Any]]:
     Get all feedback states from the FeedbackState table.
     Returns a dictionary mapping feedback_id to state data.
     """
+    conn = None
     try:
         import fabric_sql_writer
 
@@ -240,13 +249,15 @@ def get_all_feedback_states() -> Dict[str, Dict[str, Any]]:
         logger.info(f"Loaded {len(state_data)} feedback states from FeedbackState table")
 
         cursor.close()
-        conn.close()
 
         return state_data
 
     except Exception as e:
         logger.error(f"Error querying feedback states from Fabric SQL: {e}")
         return {}
+    finally:
+        if conn:
+            conn.close()
 
 
 def update_feedback_field_in_sql(feedback_id: str, field_name: str, new_value: str, bearer_token: str) -> bool:

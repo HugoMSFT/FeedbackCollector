@@ -124,7 +124,6 @@ def clean_feedback_text(text: str) -> str:
     # Remove orphaned CSS fragments and malformed patterns
     text = re.sub(r"[a-zA-Z]+:\s*[^;{}\s]+[;{}\s]*", "", text)  # CSS properties without context
     text = re.sub(r"\{[^}]*\}", "", text)  # Any remaining CSS blocks
-    text = re.sub(r"[a-zA-Z]+\.[a-zA-Z]+[,\s]*", "", text)  # Leftover CSS class references
 
     # Remove common CSS properties
     text = re.sub(r"[a-zA-Z-]+:\s*[^;]+;", "", text)

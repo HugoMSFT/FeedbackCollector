@@ -10,6 +10,7 @@ except ImportError:
     pyodbc = None
 
 import pandas as pd
+import json
 import logging
 from datetime import datetime
 from typing import List, Dict, Any
@@ -348,6 +349,7 @@ class FabricSQLWriter:
 
     def load_feedback_states(self):
         """Load state data from FeedbackState table for server-side filtering"""
+        conn = None
         try:
             # Connect to database using same pattern as other methods
             conn = None
@@ -398,7 +400,6 @@ class FabricSQLWriter:
                 }
 
             cursor.close()
-            conn.close()
 
             logger.info(f"📊 Loaded {len(state_data)} state records from FeedbackState table")
             return state_data
@@ -406,6 +407,9 @@ class FabricSQLWriter:
         except Exception as e:
             logger.error(f"❌ Error loading feedback states: {e}")
             return {}
+        finally:
+            if conn:
+                conn.close()
 
     def write_feedback_bulk(self, feedback_data: List[Dict[str, Any]], use_token: bool = True) -> Dict[str, int]:
         """
@@ -501,8 +505,6 @@ class FabricSQLWriter:
                         logger.debug(f"✅ Item already exists by ID: {deterministic_id} - checking for keyword updates")
 
                         # Extract and serialize keywords for update
-                        import json
-
                         matched_keywords_raw = feedback.get("Matched_Keywords", [])
                         if isinstance(matched_keywords_raw, list):
                             matched_keywords = json.dumps(matched_keywords_raw)
@@ -582,8 +584,6 @@ class FabricSQLWriter:
                     domains = str(feedback.get("Domains", [])) if feedback.get("Domains") else ""
 
                     # Serialize Matched_Keywords as JSON string
-                    import json
-
                     matched_keywords_raw = feedback.get("Matched_Keywords", [])
                     if isinstance(matched_keywords_raw, list):
                         matched_keywords = json.dumps(matched_keywords_raw)
@@ -680,8 +680,6 @@ class FabricSQLWriter:
                     conn.commit()
                     logger.info(f"✅ Domain sync complete: {synced_domains} records updated in Feedback table")
 
-            conn.close()
-
             result = {
                 "new_items": new_items,
                 "existing_items": existing_items,
@@ -697,6 +695,9 @@ class FabricSQLWriter:
         except Exception as e:
             logger.error(f"❌ Error in bulletproof sync: {e}")
             return {"new_items": 0, "existing_items": 0, "total_items": len(feedback_data), "id_regenerated": 0}
+        finally:
+            if conn:
+                conn.close()
 
     def sync_domains_from_state_to_feedback(self, conn):
         """
@@ -770,12 +771,14 @@ class FabricSQLWriter:
                 conn.commit()
                 logger.info(f"✅ Domain sync complete: {updated_count} records updated")
 
-            conn.close()
             return updated_count
 
         except Exception as e:
             logger.error(f"❌ Error in domain sync: {e}")
             return 0
+        finally:
+            if conn:
+                conn.close()
 
     def update_feedback_states(self, state_changes: List[Dict[str, Any]], use_token: bool = True) -> bool:
         """
@@ -886,7 +889,6 @@ class FabricSQLWriter:
 
             # Commit all changes
             conn.commit()
-            conn.close()
 
             logger.info(f"Successfully updated {updated_count} feedback states in Fabric SQL database")
             return True
@@ -894,9 +896,13 @@ class FabricSQLWriter:
         except Exception as e:
             logger.error(f"Error updating feedback states in Fabric SQL database: {e}")
             return False
+        finally:
+            if conn:
+                conn.close()
 
     def get_feedback_state(self, feedback_id: str, use_token: bool = True) -> Dict[str, Any]:
         """Get current state of a feedback item from SQL database"""
+        conn = None
         try:
             # Connect to database
             if use_token and self.bearer_token:
@@ -916,7 +922,6 @@ class FabricSQLWriter:
             )
 
             row = cursor.fetchone()
-            conn.close()
 
             if row:
                 return {
@@ -933,6 +938,9 @@ class FabricSQLWriter:
         except Exception as e:
             logger.error(f"Error getting feedback state from SQL database: {e}")
             return None
+        finally:
+            if conn:
+                conn.close()
 
     def recategorize_all_feedback(self, use_token: bool = True) -> Dict[str, int]:
         """
@@ -1042,7 +1050,6 @@ class FabricSQLWriter:
                     continue
 
             conn.commit()
-            conn.close()
 
             result = {
                 "recategorized": recategorized_count,
@@ -1058,6 +1065,9 @@ class FabricSQLWriter:
         except Exception as e:
             logger.error(f"❌ Error in recategorize_all_feedback: {e}")
             return {"recategorized": 0, "skipped_user_modified": 0, "total_processed": 0}
+        finally:
+            if conn:
+                conn.close()
 
 
 def update_feedback_states_in_fabric_sql(bearer_token: str, state_changes: List[Dict[str, Any]]) -> bool:

@@ -2,7 +2,7 @@ import requests
 import time
 import json
 import logging
-import sys  # Added for direct print debugging
+import re
 from config import FABRIC_LIVY_ENDPOINT, FABRIC_TARGET_TABLE_NAME, FABRIC_WRITE_MODE, TABLE_COLUMNS
 
 logger = logging.getLogger(__name__)
@@ -52,10 +52,20 @@ def _sanitize_data_recursively(data: any) -> any:
     return data
 
 
+_VALID_WRITE_MODES = {"append", "overwrite", "error", "errorifexists", "ignore"}
+
+
 def _prepare_pyspark_payload(data_list: list, table_name: str, write_mode: str) -> str:
     """
     Prepares the PySpark code payload to ingest data into a Fabric Delta table.
     """
+    # Validate table_name to prevent code injection (allow only alphanumeric, underscore, dot)
+    if not re.match(r'^[A-Za-z_][A-Za-z0-9_.]*$', table_name):
+        raise ValueError(f"Invalid table name: {table_name}")
+    # Validate write_mode against known Spark modes
+    if write_mode not in _VALID_WRITE_MODES:
+        raise ValueError(f"Invalid write mode: {write_mode}")
+
     logger.debug(f"PySpark payload prepared with {len(data_list)} items")
     if not data_list:
         logger.debug("Empty data list, returning early")
@@ -376,7 +386,7 @@ def write_data_to_fabric(token: str, data_to_write: list) -> bool:
 
     # Re-enable processing for all data items with the repr() fix
     data_to_write_for_spark = data_to_write
-    print(f"DEBUG_FW: Processing {len(data_to_write_for_spark)} items for Spark.", file=sys.stderr)
+    logger.debug(f"Processing {len(data_to_write_for_spark)} items for Spark.")
 
     session_id = None
     try:
@@ -402,11 +412,9 @@ def write_data_to_fabric(token: str, data_to_write: list) -> bool:
         return True
     except ValueError as ve:
         logger.error(f"ValueError in write_data_to_fabric: {ve}")
-        print(f"DEBUG_FW: ValueError in write_data_to_fabric: {ve}", file=sys.stderr)
         return False
     except Exception as e:
         logger.error(f"Overall error in write_data_to_fabric: {e}", exc_info=True)
-        print(f"DEBUG_FW: Exception in write_data_to_fabric: {e}", file=sys.stderr)
         return False
     finally:
         if session_id:
@@ -434,7 +442,6 @@ def update_feedback_states_in_fabric(token: str, state_changes: list) -> bool:
         return True
 
     logger.warning(f"🔥 FABRIC STATE UPDATE: Processing {len(state_changes)} state changes")
-    print(f"🔥 FABRIC STATE UPDATE: Processing {len(state_changes)} state changes", file=sys.stderr)
 
     session_id = None
     try:
@@ -463,12 +470,10 @@ def update_feedback_states_in_fabric(token: str, state_changes: list) -> bool:
             return False
 
         logger.warning("✅ FABRIC STATE UPDATE: All state changes written successfully")
-        print("✅ FABRIC STATE UPDATE: All state changes written successfully", file=sys.stderr)
         return True
 
     except Exception as e:
         logger.error(f"Error in update_feedback_states_in_fabric: {e}", exc_info=True)
-        print(f"❌ FABRIC STATE UPDATE ERROR: {e}", file=sys.stderr)
         return False
     finally:
         if session_id:

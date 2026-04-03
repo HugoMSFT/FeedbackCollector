@@ -1,323 +1,424 @@
 {
-  "DEVELOPER_REQUESTS": {
-    "name": "Developer Experience Requests",
+  "DATA_VIRTUALIZATION": {
+    "name": "Data Virtualization & External Data Access",
     "audience": "Developer",
-    "description": "Feedback related to workload development using WDK/SDK",
+    "description": "Feedback about querying external data from SQL using OPENROWSET, External Tables, PolyBase, CETAS, and related features",
     "subcategories": {
-      "WDK_FEATURES": {
-        "name": "WDK Enhancement",
+      "OPENROWSET": {
+        "name": "OPENROWSET",
         "keywords": [
-          "wdk",
-          "workload development kit",
-          "development kit",
-          "build",
-          "compile",
-          "debug",
-          "testing framework",
-          "unit test",
-          "deployment",
-          "packaging",
-          "manifest",
-          "workload project",
-          "fet",
-          "fabric extensibility toolkit"
+          "openrowset",
+          "OPENROWSET",
+          "bulk insert",
+          "BULK INSERT",
+          "ad hoc distributed queries",
+          "ad hoc query",
+          "OLE DB",
+          "OLEDB",
+          "rowset"
+        ],
+        "priority": "critical",
+        "feature_area": "Data Virtualization"
+      },
+      "EXTERNAL_TABLES": {
+        "name": "External Tables",
+        "keywords": [
+          "external table",
+          "external tables",
+          "CREATE EXTERNAL TABLE",
+          "external data source",
+          "CREATE EXTERNAL DATA SOURCE",
+          "external file format",
+          "CREATE EXTERNAL FILE FORMAT",
+          "DROP EXTERNAL TABLE",
+          "ALTER EXTERNAL DATA SOURCE"
+        ],
+        "priority": "critical",
+        "feature_area": "Data Virtualization"
+      },
+      "CETAS": {
+        "name": "CETAS (Create External Table As Select)",
+        "keywords": [
+          "CETAS",
+          "cetas",
+          "CREATE EXTERNAL TABLE AS SELECT",
+          "create external table as select",
+          "export to parquet",
+          "export to csv",
+          "export to delta",
+          "data export",
+          "external table as select"
         ],
         "priority": "high",
-        "feature_area": "Workload Development"
+        "feature_area": "Data Virtualization"
       },
-      "SDK_FEATURES": {
-        "name": "SDK Enhancement",
+      "POLYBASE": {
+        "name": "PolyBase",
         "keywords": [
-          "sdk",
-          "software development kit",
-          "api",
-          "connector",
-          "authentication",
-          "data source",
-          "data connection",
-          "rest api",
-          "graphql",
-          "oauth",
-          "service principal",
-          "token",
-          "fet",
-          "fabric extensibility toolkit"
+          "polybase",
+          "PolyBase",
+          "poly base",
+          "PolyBase connector",
+          "PolyBase configuration",
+          "PolyBase scale-out",
+          "data movement service",
+          "DMS",
+          "PolyBase error",
+          "PolyBase performance"
+        ],
+        "priority": "critical",
+        "feature_area": "Data Virtualization"
+      },
+      "DATA_VIRTUALIZATION_GENERAL": {
+        "name": "Data Virtualization General",
+        "keywords": [
+          "data virtualization",
+          "virtual data",
+          "data federation",
+          "federated query",
+          "query external data",
+          "external data access",
+          "data abstraction",
+          "logical data warehouse",
+          "virtualization"
         ],
         "priority": "high",
-        "feature_area": "Workload Development"
-      },
-      "DEV_TOOLS": {
-        "name": "Development Tools",
+        "feature_area": "Data Virtualization"
+      }
+    }
+  },
+  "FILE_FORMAT_ACCESS": {
+    "name": "File Format & Data Lake Access",
+    "audience": "Developer",
+    "description": "Feedback about reading and querying specific file formats (Parquet, Delta, CSV, JSON, Excel, ORC, Avro) from SQL",
+    "subcategories": {
+      "PARQUET": {
+        "name": "Parquet Files",
         "keywords": [
-          "ide",
-          "visual studio",
-          "vs code",
-          "intellisense",
-          "git",
-          "version control",
-          "source control",
-          "debugging",
-          "breakpoint",
-          "profiling",
-          "local development"
+          "parquet",
+          "Parquet",
+          "read parquet",
+          "query parquet",
+          "parquet file",
+          "parquet format",
+          "parquet performance",
+          "parquet schema",
+          "parquet predicate pushdown",
+          "snappy",
+          "parquet compression"
+        ],
+        "priority": "high",
+        "feature_area": "File Format Access"
+      },
+      "DELTA": {
+        "name": "Delta Lake / Delta Tables",
+        "keywords": [
+          "delta",
+          "delta table",
+          "delta tables",
+          "delta lake",
+          "Delta Lake",
+          "read delta",
+          "query delta",
+          "delta format",
+          "delta log",
+          "time travel",
+          "delta versioning"
+        ],
+        "priority": "high",
+        "feature_area": "File Format Access"
+      },
+      "CSV_JSON": {
+        "name": "CSV & JSON Files",
+        "keywords": [
+          "csv",
+          "CSV",
+          "json file",
+          "JSON",
+          "read csv",
+          "query csv",
+          "read json",
+          "query json",
+          "csv format",
+          "json format",
+          "delimiter",
+          "field terminator",
+          "row terminator",
+          "header row",
+          "FIELDTERMINATOR",
+          "ROWTERMINATOR"
         ],
         "priority": "medium",
-        "feature_area": "Development Experience"
+        "feature_area": "File Format Access"
       },
-      "DEV_DOCUMENTATION": {
-        "name": "Developer Documentation",
+      "EXCEL": {
+        "name": "Excel Files (XLS/XLSX)",
         "keywords": [
-          "developer docs",
-          "api documentation",
-          "sample code",
-          "code samples",
+          "xls",
+          "xlsx",
+          "excel",
+          "Excel",
+          "spreadsheet",
+          "read excel",
+          "query excel",
+          "ACE OLEDB",
+          "JET OLEDB",
+          "Microsoft.ACE.OLEDB"
+        ],
+        "priority": "medium",
+        "feature_area": "File Format Access"
+      },
+      "OTHER_FORMATS": {
+        "name": "ORC, Avro & Other Formats",
+        "keywords": [
+          "ORC",
+          "orc",
+          "avro",
+          "Avro",
+          "FORMAT_TYPE",
+          "DATA_SOURCE",
+          "FILE_FORMAT",
+          "file format",
+          "data format"
+        ],
+        "priority": "medium",
+        "feature_area": "File Format Access"
+      },
+      "STORAGE_CONNECTIVITY": {
+        "name": "Cloud Storage & Data Lake Connectivity",
+        "keywords": [
+          "blob storage",
+          "Azure Blob",
+          "ADLS",
+          "Azure Data Lake",
+          "data lake",
+          "wasbs",
+          "abfss",
+          "S3",
+          "HDFS",
+          "storage account",
+          "SAS token",
+          "managed identity",
+          "storage credential",
+          "database scoped credential"
+        ],
+        "priority": "high",
+        "feature_area": "Storage Connectivity"
+      }
+    }
+  },
+  "CROSS_DATABASE": {
+    "name": "Linked Server & Cross-Database Queries",
+    "audience": "DBA",
+    "description": "Feedback about linked servers, cross-database queries, distributed queries, and remote data access between SQL instances",
+    "subcategories": {
+      "LINKED_SERVER": {
+        "name": "Linked Server",
+        "keywords": [
+          "linked server",
+          "sp_addlinkedserver",
+          "sp_dropserver",
+          "sp_addlinkedsrvlogin",
+          "OPENQUERY",
+          "openquery",
+          "OPENDATASOURCE",
+          "opendatasource",
+          "four-part name",
+          "remote server",
+          "linked server error",
+          "linked server performance"
+        ],
+        "priority": "high",
+        "feature_area": "Cross-Database Access"
+      },
+      "CROSS_DB_QUERIES": {
+        "name": "Cross-Database Queries",
+        "keywords": [
+          "cross-database",
+          "cross database",
+          "three-part name",
+          "USE database",
+          "distributed query",
+          "distributed transaction",
+          "MSDTC",
+          "remote query",
+          "elastic query",
+          "elastic database query",
+          "remote procedure call"
+        ],
+        "priority": "high",
+        "feature_area": "Cross-Database Access"
+      }
+    }
+  },
+  "COLUMNSTORE": {
+    "name": "Columnstore Indexes",
+    "audience": "DBA",
+    "description": "Feedback about columnstore indexes including performance, maintenance, compression, and usage patterns",
+    "subcategories": {
+      "COLUMNSTORE_PERF": {
+        "name": "Columnstore Performance",
+        "keywords": [
+          "columnstore",
+          "columnstore index",
+          "clustered columnstore",
+          "CCI",
+          "columnstore performance",
+          "batch mode",
+          "batch execution",
+          "segment elimination",
+          "rowgroup",
+          "row group",
+          "delta store"
+        ],
+        "priority": "high",
+        "feature_area": "Columnstore"
+      },
+      "COLUMNSTORE_MGMT": {
+        "name": "Columnstore Management & Maintenance",
+        "keywords": [
+          "nonclustered columnstore",
+          "NCCI",
+          "columnstore compression",
+          "columnstore rebuild",
+          "columnstore reorganize",
+          "tuple mover",
+          "columnstore archive",
+          "columnstore fragmentation",
+          "ALTER INDEX REORGANIZE",
+          "columnstore maintenance"
+        ],
+        "priority": "medium",
+        "feature_area": "Columnstore"
+      }
+    }
+  },
+  "PLATFORM_COMPATIBILITY": {
+    "name": "Platform & SQL Engine Compatibility",
+    "audience": "Developer",
+    "description": "Feedback about feature availability, compatibility differences, and migration between SQL Server, Azure SQL DB, Azure SQL MI, and Fabric SQL",
+    "subcategories": {
+      "SQL_SERVER": {
+        "name": "SQL Server (On-Premises)",
+        "keywords": [
+          "SQL Server",
+          "sql server",
+          "on-premises",
+          "on-prem",
+          "SQL Server 2022",
+          "SQL Server 2019",
+          "SQL Server 2017",
+          "SQL Server version",
+          "SSMS"
+        ],
+        "priority": "high",
+        "feature_area": "SQL Server"
+      },
+      "AZURE_SQL_DB": {
+        "name": "Azure SQL Database",
+        "keywords": [
+          "Azure SQL Database",
+          "azure sql database",
+          "Azure SQL DB",
+          "SQL Database",
+          "serverless",
+          "DTU",
+          "vCore",
+          "elastic pool",
+          "Hyperscale"
+        ],
+        "priority": "high",
+        "feature_area": "Azure SQL"
+      },
+      "AZURE_SQL_MI": {
+        "name": "Azure SQL Managed Instance",
+        "keywords": [
+          "Azure SQL Managed Instance",
+          "managed instance",
+          "Azure SQL MI",
+          "SQL MI",
+          "managed instance link",
+          "MI"
+        ],
+        "priority": "high",
+        "feature_area": "Azure SQL"
+      },
+      "FABRIC_SQL": {
+        "name": "Fabric SQL Database",
+        "keywords": [
+          "Fabric SQL",
+          "Fabric SQL database",
+          "fabric sql",
+          "SQL in Fabric",
+          "Fabric database",
+          "SQL analytics endpoint",
+          "SQL endpoint",
+          "serverless SQL",
+          "SQL on-demand"
+        ],
+        "priority": "high",
+        "feature_area": "Fabric SQL"
+      },
+      "MIGRATION": {
+        "name": "Migration & Compatibility",
+        "keywords": [
+          "migration",
+          "migrate",
+          "compatibility level",
+          "compat level",
+          "breaking change",
+          "deprecated",
+          "not supported",
+          "unsupported",
+          "feature parity",
+          "T-SQL compatibility"
+        ],
+        "priority": "medium",
+        "feature_area": "Migration"
+      }
+    }
+  },
+  "DOCUMENTATION_HELP": {
+    "name": "Documentation, Help & How-To",
+    "audience": "Developer",
+    "description": "Requests for documentation, tutorials, examples, and troubleshooting guidance",
+    "subcategories": {
+      "DOCUMENTATION_GAPS": {
+        "name": "Missing or Unclear Documentation",
+        "keywords": [
+          "documentation",
+          "docs",
+          "document",
+          "how to",
           "tutorial",
-          "developer guide",
-          "how to develop",
-          "best practices",
-          "reference",
-          "sdk docs"
+          "example",
+          "sample code",
+          "guide",
+          "getting started",
+          "learn",
+          "help",
+          "unclear",
+          "confusing"
         ],
         "priority": "medium",
         "feature_area": "Documentation"
       },
-      "DEV_EXPERIENCE": {
-        "name": "Development Experience",
+      "ERROR_TROUBLESHOOTING": {
+        "name": "Error Troubleshooting",
         "keywords": [
-          "developer experience",
-          "dx",
-          "workflow",
-          "productivity",
-          "automation",
-          "ci/cd",
-          "continuous integration",
-          "testing automation",
-          "build pipeline"
-        ],
-        "priority": "medium",
-        "feature_area": "Development Experience"
-      },
-      "AGENTIC_EXPERIENCES": {
-        "name": "Agentic Experiences",
-        "keywords": [
-          "copilot",
-          "knowledge base",
-          "instructions",
-          "instruction",
-          "agent",
-          "agentic",
-          "ai agent",
-          "autonomous agent",
-          "multi-agent",
-          "grounding",
-          "rag",
-          "retrieval augmented",
-          "system prompt",
-          "prompt engineering",
-          "orchestration",
-          "function calling",
-          "tool use",
-          "generative ai",
-          "gen ai",
-          "model endpoint",
-          "ai assumed",
-          "ai guidance",
-          "ai instruction",
-          "ai coding",
-          "ai implementation",
-          "hallucinate",
-          "hallucination",
-          "guidance to ai",
-          "questions to ask"
-        ],
-        "priority": "high",
-        "feature_area": "Agentic AI"
-      }
-    }
-  },
-  "CUSTOMER_REQUESTS": {
-    "name": "Customer Experience Requests",
-    "audience": "Customer",
-    "description": "Feedback related to using workloads from Workload Hub/Marketplace",
-    "subcategories": {
-      "WORKLOAD_HUB": {
-        "name": "Workload Hub Experience",
-        "keywords": [
-          "workload hub",
-          "hub",
-          "browse workloads",
-          "discover workloads",
-          "find workloads",
-          "workload gallery",
-          "workload store",
-          "search workloads",
-          "filter workloads"
-        ],
-        "priority": "high",
-        "feature_area": "Workload Discovery"
-      },
-      "MARKETPLACE": {
-        "name": "Marketplace Features",
-        "keywords": [
-          "marketplace",
-          "publish workload",
-          "workload publishing",
-          "certification",
-          "workload approval",
-          "listing",
-          "pricing",
-          "billing",
-          "monetization"
-        ],
-        "priority": "high",
-        "feature_area": "Workload Publishing"
-      },
-      "INSTALLATION": {
-        "name": "Installation & Setup",
-        "keywords": [
-          "install workload",
-          "installation",
-          "setup",
-          "configure",
-          "deployment",
-          "getting started",
-          "onboarding",
-          "first time setup",
-          "workload configuration"
-        ],
-        "priority": "high",
-        "feature_area": "Workload Usage"
-      },
-      "WORKLOAD_USAGE": {
-        "name": "Workload Usage Experience",
-        "keywords": [
-          "using workload",
-          "workload performance",
-          "workload ui",
-          "workload interface",
-          "workload features",
-          "workload functionality",
-          "user experience",
-          "usability"
-        ],
-        "priority": "high",
-        "feature_area": "Workload Usage"
-      },
-      "CUSTOMER_SUPPORT": {
-        "name": "Customer Support & Help",
-        "keywords": [
-          "help",
-          "support",
-          "customer support",
-          "documentation",
-          "user guide",
-          "how to use",
-          "tutorial",
-          "faq",
+          "error",
+          "error message",
+          "troubleshoot",
           "troubleshooting",
-          "knowledge base"
+          "debug",
+          "fix",
+          "workaround",
+          "resolution",
+          "stack trace",
+          "error code"
         ],
-        "priority": "medium",
+        "priority": "high",
         "feature_area": "Support"
-      }
-    }
-  },
-  "PLATFORM_REQUESTS": {
-    "name": "Platform & Infrastructure Requests",
-    "audience": "Platform",
-    "description": "Feedback related to platform-level features and infrastructure",
-    "subcategories": {
-      "INFRASTRUCTURE": {
-        "name": "Infrastructure & Scaling",
-        "keywords": [
-          "infrastructure",
-          "scaling",
-          "scale",
-          "capacity",
-          "resources",
-          "multi-tenant",
-          "regional",
-          "availability",
-          "reliability",
-          "uptime",
-          "disaster recovery"
-        ],
-        "priority": "high",
-        "feature_area": "Platform Infrastructure"
-      },
-      "SECURITY": {
-        "name": "Security & Compliance",
-        "keywords": [
-          "security",
-          "vulnerability",
-          "exploit",
-          "permission",
-          "access control",
-          "rbac",
-          "authentication",
-          "authorization",
-          "compliance",
-          "gdpr",
-          "privacy",
-          "audit"
-        ],
-        "priority": "critical",
-        "feature_area": "Security"
-      },
-      "MONITORING": {
-        "name": "Monitoring & Analytics",
-        "keywords": [
-          "monitoring",
-          "analytics",
-          "metrics",
-          "telemetry",
-          "logging",
-          "diagnostics",
-          "performance monitoring",
-          "usage analytics",
-          "business intelligence",
-          "reporting"
-        ],
-        "priority": "medium",
-        "feature_area": "Platform Services"
-      },
-      "INTEGRATION": {
-        "name": "Platform Integration",
-        "keywords": [
-          "integration",
-          "fabric integration",
-          "power bi",
-          "teams",
-          "office",
-          "azure",
-          "third-party",
-          "connector",
-          "api integration",
-          "service integration"
-        ],
-        "priority": "medium",
-        "feature_area": "Platform Integration"
-      },
-      "DATA_VIRTUALIZATION": {
-        "name": "Data Virtualization",
-        "keywords": [
-          "data virtualization",
-          "openrowset",
-          "external tables",
-          "external table",
-          "parquet",
-          "delta",
-          "csv",
-          "external file format",
-          "cetas",
-          "ctas",
-          "create external table",
-          "create table as select",
-          "virtual data",
-          "data federation"
-        ],
-        "priority": "high",
-        "feature_area": "Data Virtualization"
       }
     }
   }

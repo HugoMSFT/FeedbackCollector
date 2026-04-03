@@ -2,30 +2,22 @@
 class SourceConfigManager {
     constructor() {
         this.sources = {
-            reddit: {
-                enabled: true,
-                subreddit: 'MicrosoftFabric',
-                sort: 'new',
-                timeFilter: 'month',
-                postTypes: ['all'],
-                maxItems: 5
-            },
             github: {
-                enabled: true,
+                enabled: false,
                 repositories: [
                     {
                         owner: 'microsoft',
-                        repo: 'Microsoft-Fabric-workload-development-sample',
+                        repo: 'sql-server-samples',
+                        enabled: true
+                    },
+                    {
+                        owner: 'MicrosoftDocs',
+                        repo: 'sql-docs',
                         enabled: true
                     },
                     {
                         owner: 'microsoft',
-                        repo: 'fabric-extensibility-toolkit',
-                        enabled: true
-                    },
-                    {
-                        owner: 'microsoft',
-                        repo: 'Microsoft-fabric-tools-workload',
+                        repo: 'Azure-Samples',
                         enabled: true
                     }
                 ],
@@ -34,21 +26,21 @@ class SourceConfigManager {
                 maxItems: 5
             },
             githubIssues: {
-                enabled: true,
+                enabled: false,
                 repositories: [
                     {
                         owner: 'microsoft',
-                        repo: 'Microsoft-Fabric-workload-development-sample',
+                        repo: 'sql-server-samples',
+                        enabled: true
+                    },
+                    {
+                        owner: 'MicrosoftDocs',
+                        repo: 'sql-docs',
                         enabled: true
                     },
                     {
                         owner: 'microsoft',
-                        repo: 'fabric-extensibility-toolkit',
-                        enabled: true
-                    },
-                    {
-                        owner: 'microsoft',
-                        repo: 'Microsoft-fabric-tools-workload',
+                        repo: 'Azure-Samples',
                         enabled: true
                     }
                 ],
@@ -60,8 +52,50 @@ class SourceConfigManager {
                 enabled: true,
                 maxItems: 5
             },
-            ado: {
+            stackoverflow: {
                 enabled: true,
+                site: 'stackoverflow',
+                maxItems: 5
+            },
+            dbaStackExchange: {
+                enabled: true,
+                site: 'dba',
+                maxItems: 5
+            },
+            microsoftQA: {
+                enabled: true,
+                maxItems: 5
+            },
+            techCommunity: {
+                enabled: true,
+                maxItems: 5
+            },
+            dbtCommunity: {
+                enabled: true,
+                maxItems: 5
+            },
+            sqlServerCentral: {
+                enabled: true,
+                maxItems: 5
+            },
+            microsoftFeedback: {
+                enabled: true,
+                maxItems: 5
+            },
+            devTo: {
+                enabled: true,
+                maxItems: 5
+            },
+            hackerNews: {
+                enabled: true,
+                maxItems: 5
+            },
+            mssqlTips: {
+                enabled: true,
+                maxItems: 5
+            },
+            ado: {
+                enabled: false,
                 parentWorkItem: '1319103',
                 workItemTypes: ['Bug', 'Feature', 'User Story'],
                 states: ['New', 'Active', 'Resolved'],
@@ -414,7 +448,6 @@ class SourceConfigManager {
         const field = input.dataset.field;
         const value = input.type === 'checkbox' ? input.checked : input.value;
         
-        // Update source configuration
         if (field.includes('.')) {
             const [parent, child] = field.split('.');
             if (!this.sources[sourceId][parent]) {
@@ -467,12 +500,6 @@ class SourceConfigManager {
         let message = 'Ready';
         
         switch (sourceId) {
-            case 'reddit':
-                if (!this.sources.reddit.subreddit) {
-                    isValid = false;
-                    message = 'Missing subreddit';
-                }
-                break;
             case 'github':
                 const githubRepos = this.sources.github.repositories || [];
                 const enabledGithubRepos = githubRepos.filter(r => r.enabled);
@@ -509,10 +536,28 @@ class SourceConfigManager {
         
         const sourceConfigs = [
             {
-                id: 'reddit',
-                name: 'Reddit',
-                icon: 'bi bi-reddit',
-                description: 'Collect feedback from Reddit discussions'
+                id: 'stackoverflow',
+                name: 'Stack Overflow',
+                icon: 'bi bi-stack-overflow',
+                description: 'Collect SQL questions from Stack Overflow'
+            },
+            {
+                id: 'dbaStackExchange',
+                name: 'DBA Stack Exchange',
+                icon: 'bi bi-database',
+                description: 'Collect expert DBA questions from dba.stackexchange.com'
+            },
+            {
+                id: 'microsoftQA',
+                name: 'Microsoft Q&A',
+                icon: 'bi bi-question-circle',
+                description: 'Collect from Microsoft official Q&A forums'
+            },
+            {
+                id: 'techCommunity',
+                name: 'Tech Community',
+                icon: 'bi bi-megaphone',
+                description: 'Collect from Microsoft Tech Community blogs and discussions'
             },
             {
                 id: 'github',
@@ -531,6 +576,42 @@ class SourceConfigManager {
                 name: 'Fabric Community Forums',
                 icon: 'bi bi-people',
                 description: 'Collect feedback from Microsoft Fabric community'
+            },
+            {
+                id: 'dbtCommunity',
+                name: 'dbt Community',
+                icon: 'bi bi-chat-dots',
+                description: 'Collect from dbt Discourse forum (data engineering discussions)'
+            },
+            {
+                id: 'sqlServerCentral',
+                name: 'SQLServerCentral',
+                icon: 'bi bi-newspaper',
+                description: 'Collect articles and discussions from SQLServerCentral RSS'
+            },
+            {
+                id: 'microsoftFeedback',
+                name: 'Microsoft Feedback',
+                icon: 'bi bi-megaphone-fill',
+                description: 'Collect feature requests from Microsoft Feedback Portal'
+            },
+            {
+                id: 'devTo',
+                name: 'DEV.to',
+                icon: 'bi bi-braces',
+                description: 'Collect SQL/database articles from DEV.to community'
+            },
+            {
+                id: 'hackerNews',
+                name: 'Hacker News',
+                icon: 'bi bi-lightning',
+                description: 'Collect SQL-related stories from Hacker News'
+            },
+            {
+                id: 'mssqlTips',
+                name: 'MSSQLTips',
+                icon: 'bi bi-lightbulb',
+                description: 'Collect SQL Server tips and articles via RSS'
             },
             {
                 id: 'ado',
@@ -582,46 +663,6 @@ class SourceConfigManager {
         const source = this.sources[sourceId];
         
         switch (sourceId) {
-            case 'reddit':
-                return `
-                    <div class="config-field">
-                        <label class="fluent-label">Subreddit:</label>
-                        <input type="text" class="fluent-input source-input" 
-                               data-field="subreddit" value="${source.subreddit}">
-                    </div>
-                    <div class="config-field-row">
-                        <div class="config-field">
-                            <label class="fluent-label">Sort by:</label>
-                            <select class="fluent-select source-input" data-field="sort">
-                                <option value="new" ${source.sort === 'new' ? 'selected' : ''}>New</option>
-                                <option value="hot" ${source.sort === 'hot' ? 'selected' : ''}>Hot</option>
-                                <option value="top" ${source.sort === 'top' ? 'selected' : ''}>Top</option>
-                                <option value="rising" ${source.sort === 'rising' ? 'selected' : ''}>Rising</option>
-                            </select>
-                        </div>
-                        <div class="config-field">
-                            <label class="fluent-label">Time Filter:</label>
-                            <select class="fluent-select source-input" data-field="timeFilter">
-                                <option value="hour" ${source.timeFilter === 'hour' ? 'selected' : ''}>Past Hour</option>
-                                <option value="day" ${source.timeFilter === 'day' ? 'selected' : ''}>Past Day</option>
-                                <option value="week" ${source.timeFilter === 'week' ? 'selected' : ''}>Past Week</option>
-                                <option value="month" ${source.timeFilter === 'month' ? 'selected' : ''}>Past Month</option>
-                                <option value="year" ${source.timeFilter === 'year' ? 'selected' : ''}>Past Year</option>
-                                <option value="all" ${source.timeFilter === 'all' ? 'selected' : ''}>All Time</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="config-field">
-                        <label class="fluent-label">Max Items:</label>
-                        <input type="number" class="fluent-input source-input" 
-                               data-field="maxItems" value="${source.maxItems}" min="1" max="1000">
-                    </div>
-                    <div class="source-info">
-                        <span>Last collected: Never</span>
-                        <span>Items found: 0</span>
-                    </div>
-                `;
-                
             case 'github':
                 const githubRepos = source.repositories || [];
                 const githubRepoList = githubRepos.map((repo, index) => `
@@ -763,11 +804,59 @@ class SourceConfigManager {
                     </div>
                     <div class="fluent-alert fluent-alert-info">
                         <i class="bi bi-info-circle"></i>
-                        <div>This source uses default Microsoft Fabric Community forums configuration.</div>
+                        <div>Searches Microsoft Fabric Community forums using configured keywords.</div>
                     </div>
-                    <div class="source-info">
-                        <span>Last collected: Never</span>
-                        <span>Items found: 0</span>
+                `;
+                
+            case 'stackoverflow':
+                return `
+                    <div class="config-field">
+                        <label class="fluent-label">Max Items:</label>
+                        <input type="number" class="fluent-input source-input" 
+                               data-field="maxItems" value="${source.maxItems}" min="1" max="1000">
+                    </div>
+                    <div class="fluent-alert fluent-alert-info">
+                        <i class="bi bi-info-circle"></i>
+                        <div>Searches Stack Overflow for SQL-tagged questions matching your keywords. No API key required.</div>
+                    </div>
+                `;
+                
+            case 'dbaStackExchange':
+                return `
+                    <div class="config-field">
+                        <label class="fluent-label">Max Items:</label>
+                        <input type="number" class="fluent-input source-input" 
+                               data-field="maxItems" value="${source.maxItems}" min="1" max="1000">
+                    </div>
+                    <div class="fluent-alert fluent-alert-info">
+                        <i class="bi bi-info-circle"></i>
+                        <div>Searches DBA Stack Exchange (dba.stackexchange.com) for expert-level SQL questions. No API key required.</div>
+                    </div>
+                `;
+                
+            case 'microsoftQA':
+                return `
+                    <div class="config-field">
+                        <label class="fluent-label">Max Items:</label>
+                        <input type="number" class="fluent-input source-input" 
+                               data-field="maxItems" value="${source.maxItems}" min="1" max="1000">
+                    </div>
+                    <div class="fluent-alert fluent-alert-info">
+                        <i class="bi bi-info-circle"></i>
+                        <div>Searches Microsoft Q&A (learn.microsoft.com/answers) for SQL-related questions and answers.</div>
+                    </div>
+                `;
+                
+            case 'techCommunity':
+                return `
+                    <div class="config-field">
+                        <label class="fluent-label">Max Items:</label>
+                        <input type="number" class="fluent-input source-input" 
+                               data-field="maxItems" value="${source.maxItems}" min="1" max="1000">
+                    </div>
+                    <div class="fluent-alert fluent-alert-info">
+                        <i class="bi bi-info-circle"></i>
+                        <div>Searches Microsoft Tech Community for SQL-related blog posts and discussions.</div>
                     </div>
                 `;
                 

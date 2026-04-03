@@ -439,7 +439,9 @@ def detect_audience(text: str, source: str = "", scenario: str = "", organizatio
     for audience, keywords in AUDIENCE_DETECTION_KEYWORDS.items():
         for keyword in keywords:
             if keyword.lower() in text_lower:
-                audience_scores[audience] += 1
+                # Map DBA and Data Engineer to Developer for scoring
+                score_key = audience if audience in audience_scores else "Developer"
+                audience_scores[score_key] += 1
 
     # DevGateway and related terms get very strong Developer scoring
     devgateway_terms = ["devgateway", "dev gateway", "developer gateway", "dev portal", "developer portal"]

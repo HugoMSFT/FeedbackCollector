@@ -100,6 +100,44 @@
     "priority": "low",
     "color": "#17a2b8"
   },
+  "DOCUMENTATION_GAP": {
+    "name": "Documentation Gap",
+    "description": "Missing, incomplete, or unclear documentation",
+    "keywords": [
+      "documentation",
+      "docs",
+      "no documentation",
+      "missing docs",
+      "unclear",
+      "undocumented",
+      "where is the doc",
+      "can't find",
+      "no example",
+      "guide",
+      "tutorial"
+    ],
+    "priority": "medium",
+    "color": "#6f42c1"
+  },
+  "UNSUPPORTED_FEATURE": {
+    "name": "Unsupported / Missing Feature",
+    "description": "Feature not available on a specific SQL platform",
+    "keywords": [
+      "not supported",
+      "unsupported",
+      "not available",
+      "doesn't support",
+      "does not support",
+      "cannot use",
+      "can't use",
+      "not implemented",
+      "missing feature",
+      "feature parity",
+      "not yet available"
+    ],
+    "priority": "high",
+    "color": "#e83e8c"
+  },
   "FEEDBACK": {
     "name": "General Feedback",
     "description": "General observations, opinions, or comments",

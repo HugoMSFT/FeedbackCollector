@@ -15,11 +15,11 @@
     <link href="{{ url_for('static', filename='css/fluent-design.css') }}" rel="stylesheet">
     
     <!-- Legacy scripts -->
-    <script src="{{ url_for('static', filename='js/badge-state-manager.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/badge-state-manager.js') }}?v={{ range(1,999999)|random }}"></script>
     
     <!-- New enhanced scripts -->
-    <script src="{{ url_for('static', filename='js/source-configuration.js') }}"></script>
-    <script src="{{ url_for('static', filename='js/collection-manager.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/source-configuration.js') }}?v={{ range(1,999999)|random }}"></script>
+    <script src="{{ url_for('static', filename='js/collection-manager.js') }}?v={{ range(1,999999)|random }}"></script>
 </head>
 <body>
     <div class="app-container">
@@ -80,7 +80,7 @@
                         <h1 class="page-title">Dashboard</h1>
                         <p class="page-subtitle">Overview of your feedback collection status</p>
                     </div>
-                    <button class="fluent-button fluent-button-primary fluent-button-large" id="collectFeedbackBtn">
+                    <button class="fluent-button fluent-button-primary fluent-button-large" id="collectFeedbackBtn" onclick="collectFeedback(); return false;">
                         <i class="bi bi-search"></i>
                         Collect Feedback Now
                     </button>
@@ -1463,12 +1463,66 @@
         let collectionInProgress = false;
 
         function collectFeedback() {
-            // Use the new enhanced collection manager
-            if (window.enhancedCollectionManager) {
-                window.enhancedCollectionManager.startCollection();
-            } else {
-                // Fallback to legacy implementation
-                const resultsDiv = document.getElementById('results');
+            // Direct inline implementation to avoid JS caching issues
+            const resultsDiv = document.getElementById('results');
+
+            // Get config from source manager
+            const config = window.sourceConfigManager
+                ? window.sourceConfigManager.getCollectionConfig()
+                : { sources: { fabricCommunity: { enabled: true, maxItems: 5 } }, settings: {} };
+
+            if (!config || Object.keys(config.sources).length === 0) {
+                resultsDiv.innerHTML = '<div class="alert alert-warning">Please enable at least one data source</div>';
+                return;
+            }
+
+            resultsDiv.innerHTML = '<div class="alert alert-info"><span class="spinner-border spinner-border-sm" role="status"></span> Collecting feedback&hellip;</div>';
+
+            // Pause background polling to free connection slots
+            if (window._collectionStatusPollInterval) {
+                clearInterval(window._collectionStatusPollInterval);
+            }
+
+            fetch('/api/collect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config)
+            })
+            .then(function(response) {
+                if (!response.ok) {
+                    return response.json().then(function(body) {
+                        throw new Error(body.detail || body.error || 'HTTP ' + response.status);
+                    });
+                }
+                return response.json();
+            })
+            .then(function(data) {
+                var total = data.total || 0;
+                var html = '<div class="alert alert-success">' +
+                    '<h5>Collection Complete!</h5>' +
+                    '<ul>';
+                for (var key in data) {
+                    if (typeof data[key] === 'object' && data[key].count !== undefined) {
+                        html += '<li>' + key + ': ' + data[key].count + ' items</li>';
+                    }
+                }
+                html += '<li><strong>Total: ' + total + ' items</strong></li></ul></div>';
+                resultsDiv.innerHTML = html;
+            })
+            .catch(function(err) {
+                resultsDiv.innerHTML = '<div class="alert alert-danger">Collection failed: ' + err.message + '</div>';
+            })
+            .finally(function() {
+                // Resume background polling
+                if (typeof startCollectionStatusPolling === 'function') {
+                    startCollectionStatusPolling();
+                }
+            });
+
+            // Skip legacy path below
+            return;
+
+            if (false) { // Dead code - legacy implementation kept for reference
                 const adoWorkItemId = document.getElementById('adoWorkItemId')?.value?.trim();
                 resultsDiv.innerHTML = '<div class="alert alert-info">Starting feedback collection...</div>';
 
@@ -1767,6 +1821,7 @@
         
         // ==================== Persistent Collection Status Polling ====================
         let collectionStatusPollInterval = null;
+        window._collectionStatusPollInterval = null; // expose for inline collectFeedback
         let lastKnownCollectionStatus = 'ready';
         
         function startCollectionStatusPolling() {
@@ -1776,6 +1831,7 @@
             // Then poll every 2 seconds
             if (collectionStatusPollInterval) clearInterval(collectionStatusPollInterval);
             collectionStatusPollInterval = setInterval(pollCollectionStatus, 2000);
+            window._collectionStatusPollInterval = collectionStatusPollInterval;
         }
         
         function pollCollectionStatus() {

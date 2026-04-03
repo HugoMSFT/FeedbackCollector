@@ -37,7 +37,7 @@ def main():
     print(f"Data directory set to: {DATA_DIR}")
 
     logger.info("Starting Feedback Collector on %s:%s (debug=%s)", host, port, debug)
-    app.run(debug=debug, host=host, port=port)
+    app.run(debug=debug, host=host, port=port, threaded=True)
 
 
 if __name__ == "__main__":

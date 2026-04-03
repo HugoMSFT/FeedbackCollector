@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Dict, Any
 import json
 
-from collectors import RedditCollector, FabricCommunityCollector, GitHubDiscussionsCollector, GitHubIssuesCollector, StackOverflowCollector, MicrosoftQandACollector, TechCommunityCollector
+from collectors import FabricCommunityCollector, GitHubDiscussionsCollector, GitHubIssuesCollector, StackOverflowCollector, MicrosoftQandACollector, TechCommunityCollector, DbtCommunityCollector, SQLServerCentralCollector, MicrosoftFeedbackCollector, DevToCollector, HackerNewsCollector, MSSQLTipsCollector
 from ado_client import get_working_ado_items
 import config
 import utils
@@ -30,7 +30,7 @@ app.secret_key = _secret_key
 _state_lock = threading.Lock()
 
 last_collected_feedback = []
-last_collection_summary = {"reddit": 0, "fabric": 0, "github": 0, "github_issues": 0, "stackoverflow": 0, "dba_stackexchange": 0, "msqa": 0, "techcommunity": 0, "total": 0}
+last_collection_summary = {"fabric": 0, "github": 0, "github_issues": 0, "stackoverflow": 0, "dba_stackexchange": 0, "msqa": 0, "techcommunity": 0, "total": 0}
 
 # Collection progress tracking
 collection_status = {
@@ -453,35 +453,6 @@ def collect_feedback_route():
 
         logger.info(f"📋 COLLECTION CONFIG: {total_sources} sources enabled: {enabled_sources}")
 
-        # Pre-flight validation for configured sources
-        if "reddit" in enabled_sources:
-            if (
-                not config.REDDIT_CLIENT_ID
-                or not config.REDDIT_CLIENT_SECRET
-                or not config.REDDIT_USER_AGENT
-            ):
-                logger.error("❌ Reddit enabled but credentials missing")
-                collection_status.update(
-                    {
-                        "status": "error",
-                        "message": "Collection failed",
-                        "end_time": datetime.now().isoformat(),
-                        "error_message": (
-                            "❌ Reddit is enabled but credentials are missing. "
-                            "Add REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, and REDDIT_USER_AGENT to .env file."
-                        ),
-                    }
-                )
-                return (
-                    jsonify(
-                        {
-                            "error": "Reddit credentials not configured",
-                            "detail": "REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, or REDDIT_USER_AGENT is missing",
-                        }
-                    ),
-                    400,
-                )
-
         # Reload keywords, categories, and impact types from files before collection
         # This ensures we use the latest configuration set via the web UI
         import config as cfg
@@ -498,7 +469,6 @@ def collect_feedback_route():
         results = {}
 
         # Initialize all feedback variables to empty lists
-        reddit_feedback = []
         fabric_feedback = []
         github_feedback = []
         github_issues_feedback = []
@@ -507,38 +477,12 @@ def collect_feedback_route():
         dba_stackexchange_feedback = []
         msqa_feedback = []
         techcommunity_feedback = []
-
-        # Collect from Reddit if enabled
-        if source_configs.get("reddit", {}).get("enabled", False):
-            collection_status["current_source"] = "Reddit"
-            collection_status["message"] = "Collecting from Reddit..."
-            reddit_config = source_configs["reddit"]
-            subreddits = reddit_config.get("subreddits", [reddit_config.get("subreddit", "SQLServer")])
-            logger.info(f"🔴 REDDIT: Collecting from {subreddits}")
-
-            reddit_collector = RedditCollector()
-
-            # Pass configuration to collector if it supports it
-            if hasattr(reddit_collector, "configure"):
-                reddit_collector.configure(
-                    {
-                        "subreddits": subreddits,
-                        "sort": reddit_config.get("sort", "new"),
-                        "time_filter": reddit_config.get("timeFilter", "month"),
-                        "max_items": reddit_config.get("maxItems", 200),
-                    }
-                )
-
-            reddit_feedback = reddit_collector.collect()
-            logger.info(f"Reddit collector found {len(reddit_feedback)} items.")
-            collection_status["sources_completed"].append("Reddit")
-            if total_sources > 0:
-                collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
-            # Add source counts for real-time updates
-            collection_status["source_counts"] = collection_status.get("source_counts", {})
-            collection_status["source_counts"]["reddit"] = len(reddit_feedback)
-            all_feedback.extend(reddit_feedback)
-            results["reddit"] = {"count": len(reddit_feedback), "completed": True}
+        dbt_feedback = []
+        sqlservercentral_feedback = []
+        msfeedback_feedback = []
+        devto_feedback = []
+        hackernews_feedback = []
+        mssqltips_feedback = []
 
         # Collect from Fabric Community if enabled
         if source_configs.get("fabricCommunity", {}).get("enabled", False):
@@ -876,6 +820,126 @@ def collect_feedback_route():
             all_feedback.extend(techcommunity_feedback)
             results["techCommunity"] = {"count": len(techcommunity_feedback), "completed": True}
 
+        # Collect from dbt Community if enabled
+        if source_configs.get("dbtCommunity", {}).get("enabled", False):
+            collection_status["current_source"] = "dbt Community"
+            collection_status["message"] = "Collecting from dbt Community..."
+            dbt_config = source_configs["dbtCommunity"]
+            logger.info("🔶 DBT COMMUNITY: Collecting feedback")
+
+            dbt_collector = DbtCommunityCollector()
+            dbt_collector.configure({"max_items": dbt_config.get("maxItems", 200)})
+
+            dbt_feedback = dbt_collector.collect()
+            dbt_collector.close()
+            logger.info(f"dbt Community collector found {len(dbt_feedback)} items.")
+            collection_status["sources_completed"].append("dbt Community")
+            if total_sources > 0:
+                collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
+            collection_status["source_counts"] = collection_status.get("source_counts", {})
+            collection_status["source_counts"]["dbtCommunity"] = len(dbt_feedback)
+            all_feedback.extend(dbt_feedback)
+            results["dbtCommunity"] = {"count": len(dbt_feedback), "completed": True}
+
+        # Collect from SQLServerCentral if enabled
+        if source_configs.get("sqlServerCentral", {}).get("enabled", False):
+            collection_status["current_source"] = "SQLServerCentral"
+            collection_status["message"] = "Collecting from SQLServerCentral..."
+            ssc_config = source_configs["sqlServerCentral"]
+            logger.info("📰 SQLSERVERCENTRAL: Collecting feedback")
+
+            ssc_collector = SQLServerCentralCollector()
+            ssc_collector.configure({"max_items": ssc_config.get("maxItems", 200)})
+
+            sqlservercentral_feedback = ssc_collector.collect()
+            ssc_collector.close()
+            logger.info(f"SQLServerCentral collector found {len(sqlservercentral_feedback)} items.")
+            collection_status["sources_completed"].append("SQLServerCentral")
+            if total_sources > 0:
+                collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
+            collection_status["source_counts"] = collection_status.get("source_counts", {})
+            collection_status["source_counts"]["sqlServerCentral"] = len(sqlservercentral_feedback)
+            all_feedback.extend(sqlservercentral_feedback)
+            results["sqlServerCentral"] = {"count": len(sqlservercentral_feedback), "completed": True}
+
+        # Collect from Microsoft Feedback Portal if enabled
+        if source_configs.get("microsoftFeedback", {}).get("enabled", False):
+            collection_status["current_source"] = "Microsoft Feedback"
+            collection_status["message"] = "Collecting from Microsoft Feedback Portal..."
+            msf_config = source_configs["microsoftFeedback"]
+            logger.info("🗳️ MICROSOFT FEEDBACK: Collecting feedback")
+
+            msf_collector = MicrosoftFeedbackCollector()
+            msf_collector.configure({"max_items": msf_config.get("maxItems", 200)})
+
+            msfeedback_feedback = msf_collector.collect()
+            msf_collector.close()
+            logger.info(f"Microsoft Feedback collector found {len(msfeedback_feedback)} items.")
+            collection_status["sources_completed"].append("Microsoft Feedback")
+            if total_sources > 0:
+                collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
+            collection_status["source_counts"] = collection_status.get("source_counts", {})
+            collection_status["source_counts"]["microsoftFeedback"] = len(msfeedback_feedback)
+            all_feedback.extend(msfeedback_feedback)
+            results["microsoftFeedback"] = {"count": len(msfeedback_feedback), "completed": True}
+
+        # Collect from DEV.to if enabled
+        if source_configs.get("devTo", {}).get("enabled", False):
+            collection_status["current_source"] = "DEV.to"
+            collection_status["message"] = "Collecting from DEV.to..."
+            dt_config = source_configs["devTo"]
+            logger.info("📝 DEV.TO: Collecting feedback")
+            dt_collector = DevToCollector()
+            dt_collector.configure({"max_items": dt_config.get("maxItems", 200)})
+            devto_feedback = dt_collector.collect()
+            dt_collector.close()
+            logger.info(f"DEV.to collector found {len(devto_feedback)} items.")
+            collection_status["sources_completed"].append("DEV.to")
+            if total_sources > 0:
+                collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
+            collection_status["source_counts"] = collection_status.get("source_counts", {})
+            collection_status["source_counts"]["devTo"] = len(devto_feedback)
+            all_feedback.extend(devto_feedback)
+            results["devTo"] = {"count": len(devto_feedback), "completed": True}
+
+        # Collect from Hacker News if enabled
+        if source_configs.get("hackerNews", {}).get("enabled", False):
+            collection_status["current_source"] = "Hacker News"
+            collection_status["message"] = "Collecting from Hacker News..."
+            hn_config = source_configs["hackerNews"]
+            logger.info("🟠 HACKER NEWS: Collecting feedback")
+            hn_collector = HackerNewsCollector()
+            hn_collector.configure({"max_items": hn_config.get("maxItems", 200)})
+            hackernews_feedback = hn_collector.collect()
+            hn_collector.close()
+            logger.info(f"Hacker News collector found {len(hackernews_feedback)} items.")
+            collection_status["sources_completed"].append("Hacker News")
+            if total_sources > 0:
+                collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
+            collection_status["source_counts"] = collection_status.get("source_counts", {})
+            collection_status["source_counts"]["hackerNews"] = len(hackernews_feedback)
+            all_feedback.extend(hackernews_feedback)
+            results["hackerNews"] = {"count": len(hackernews_feedback), "completed": True}
+
+        # Collect from MSSQLTips if enabled
+        if source_configs.get("mssqlTips", {}).get("enabled", False):
+            collection_status["current_source"] = "MSSQLTips"
+            collection_status["message"] = "Collecting from MSSQLTips..."
+            mt_config = source_configs["mssqlTips"]
+            logger.info("💡 MSSQLTIPS: Collecting feedback")
+            mt_collector = MSSQLTipsCollector()
+            mt_collector.configure({"max_items": mt_config.get("maxItems", 200)})
+            mssqltips_feedback = mt_collector.collect()
+            mt_collector.close()
+            logger.info(f"MSSQLTips collector found {len(mssqltips_feedback)} items.")
+            collection_status["sources_completed"].append("MSSQLTips")
+            if total_sources > 0:
+                collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
+            collection_status["source_counts"] = collection_status.get("source_counts", {})
+            collection_status["source_counts"]["mssqlTips"] = len(mssqltips_feedback)
+            all_feedback.extend(mssqltips_feedback)
+            results["mssqlTips"] = {"count": len(mssqltips_feedback), "completed": True}
+
         # Apply sentiment analysis to all feedback sources
         def add_sentiment_to_feedback(feedback_list, source_name):
             for item in feedback_list:
@@ -894,7 +958,6 @@ def collect_feedback_route():
             return feedback_list
 
         # Add sentiment analysis to all feedback sources
-        reddit_feedback = add_sentiment_to_feedback(reddit_feedback, "Reddit")
         fabric_feedback = add_sentiment_to_feedback(fabric_feedback, "Fabric Community")
         github_feedback = add_sentiment_to_feedback(github_feedback, "GitHub Discussions")
         github_issues_feedback = add_sentiment_to_feedback(github_issues_feedback, "GitHub Issues")
@@ -902,11 +965,17 @@ def collect_feedback_route():
         dba_stackexchange_feedback = add_sentiment_to_feedback(dba_stackexchange_feedback, "DBA Stack Exchange")
         msqa_feedback = add_sentiment_to_feedback(msqa_feedback, "Microsoft Q&A")
         techcommunity_feedback = add_sentiment_to_feedback(techcommunity_feedback, "Tech Community")
+        dbt_feedback = add_sentiment_to_feedback(dbt_feedback, "dbt Community")
+        sqlservercentral_feedback = add_sentiment_to_feedback(sqlservercentral_feedback, "SQLServerCentral")
+        msfeedback_feedback = add_sentiment_to_feedback(msfeedback_feedback, "Microsoft Feedback")
+        devto_feedback = add_sentiment_to_feedback(devto_feedback, "DEV.to")
+        hackernews_feedback = add_sentiment_to_feedback(hackernews_feedback, "Hacker News")
+        mssqltips_feedback = add_sentiment_to_feedback(mssqltips_feedback, "MSSQLTips")
 
         # Note: all_feedback was already built by extending with each source
         # No need to combine again as it would lose the items
         logger.info(
-            f"Final feedback counts: Reddit={len(reddit_feedback)}, Fabric={len(fabric_feedback)}, GitHub Discussions={len(github_feedback)}, GitHub Issues={len(github_issues_feedback)}, ADO={len(ado_feedback)}, SO={len(stackoverflow_feedback)}, DBA.SE={len(dba_stackexchange_feedback)}, MSQA={len(msqa_feedback)}, TechCommunity={len(techcommunity_feedback)}, Total={len(all_feedback)}"
+            f"Final feedback counts: Fabric={len(fabric_feedback)}, GitHub Discussions={len(github_feedback)}, GitHub Issues={len(github_issues_feedback)}, ADO={len(ado_feedback)}, SO={len(stackoverflow_feedback)}, DBA.SE={len(dba_stackexchange_feedback)}, MSQA={len(msqa_feedback)}, TechCommunity={len(techcommunity_feedback)}, dbt={len(dbt_feedback)}, SSC={len(sqlservercentral_feedback)}, MSFeedback={len(msfeedback_feedback)}, Total={len(all_feedback)}"
         )
 
         # Generate deterministic IDs for all feedback items BEFORE state initialization
@@ -946,7 +1015,6 @@ def collect_feedback_route():
 
         last_collected_feedback = all_feedback
         last_collection_summary = {
-            "reddit": {"count": len(reddit_feedback), "completed": True},
             "fabric": {"count": len(fabric_feedback), "completed": True},
             "github": {"count": len(github_feedback), "completed": True},
             "github_issues": {"count": len(github_issues_feedback), "completed": True},
@@ -955,6 +1023,12 @@ def collect_feedback_route():
             "dba_stackexchange": {"count": len(dba_stackexchange_feedback), "completed": True},
             "microsoftQA": {"count": len(msqa_feedback), "completed": True},
             "techCommunity": {"count": len(techcommunity_feedback), "completed": True},
+            "dbtCommunity": {"count": len(dbt_feedback), "completed": True},
+            "sqlServerCentral": {"count": len(sqlservercentral_feedback), "completed": True},
+            "microsoftFeedback": {"count": len(msfeedback_feedback), "completed": True},
+            "devTo": {"count": len(devto_feedback), "completed": True},
+            "hackerNews": {"count": len(hackernews_feedback), "completed": True},
+            "mssqlTips": {"count": len(mssqltips_feedback), "completed": True},
             "total": len(all_feedback),
         }
         logger.info(f"Total feedback items collected: {len(all_feedback)}")
@@ -1029,12 +1103,7 @@ def collect_feedback_route():
         ):
             error_msg = (
                 "❌ Authentication Error: Failed to authenticate with data source. "
-                "Check your API credentials (Reddit, GitHub, Azure DevOps)."
-            )
-        elif "REDDIT_CLIENT_ID" in error_msg or "REDDIT_CLIENT_SECRET" in error_msg:
-            error_msg = (
-                "❌ Missing Reddit Credentials: REDDIT_CLIENT_ID or REDDIT_CLIENT_SECRET not configured. "
-                "Add them to your .env file or disable Reddit collection."
+                "Check your API credentials (GitHub, Azure DevOps)."
             )
         elif "Connection" in error_msg or "timeout" in error_msg.lower():
             error_msg = (
@@ -1044,7 +1113,7 @@ def collect_feedback_route():
         elif "404" in error_msg:
             error_msg = (
                 "❌ Not Found: The requested resource was not found. "
-                "Check your configuration (subreddit name, repository URL, etc.)."
+                "Check your configuration (repository URL, etc.)."
             )
         elif "rate limit" in error_msg.lower():
             error_msg = (
@@ -2407,6 +2476,31 @@ def clear_fabric_token():
     except Exception as e:
         logger.error(f"Error clearing token: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/test-collect")
+def test_collect_page():
+    """Minimal test page for /api/collect"""
+    return """<!DOCTYPE html>
+<html><head><title>Test Collect</title></head>
+<body>
+<h2>Test Collection</h2>
+<button id="btn" onclick="doCollect()">Collect (Fabric only)</button>
+<pre id="out">Click the button...</pre>
+<script>
+function doCollect() {
+    document.getElementById('out').textContent = 'Sending POST...';
+    fetch('/api/collect', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({sources:{fabricCommunity:{enabled:true,maxItems:5}},settings:{}})
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(d){ document.getElementById('out').textContent = JSON.stringify(d, null, 2); })
+    .catch(function(e){ document.getElementById('out').textContent = 'ERROR: ' + e.message; });
+}
+</script>
+</body></html>"""
 
 
 @app.route("/api/collection-progress")

@@ -21,9 +21,9 @@ class EnhancedCollectionManager {
     }
     
     setupEventListeners() {
-        // Main collection button
+        // Main collection button - skip if onclick handler is already set (inline handler in HTML)
         const collectButton = document.getElementById('collectFeedbackBtn');
-        if (collectButton) {
+        if (collectButton && !collectButton.hasAttribute('onclick')) {
             collectButton.addEventListener('click', () => this.startCollection());
         }
         
@@ -99,16 +99,12 @@ class EnhancedCollectionManager {
         this.showProgress();
         
         try {
-            // Start server-sent events for real-time updates
-            this.startProgressTracking();
-            
-            // Aggressive reset after starting SSE to override any initial stale data
-            setTimeout(() => {
-                this.resetProgressDisplays();
-                console.log('✅ Post-SSE reset completed to override any stale server data');
-            }, 200);
-            
-            // Send collection request
+            // Use polling instead of SSE for progress tracking.
+            // SSE (EventSource) holds a persistent connection that counts against
+            // the browser's per-host connection limit (~6 for HTTP/1.1), which can
+            // block the POST request from being sent.
+            this.startProgressPolling();
+
             const response = await fetch('/api/collect', {
                 method: 'POST',
                 headers: {
@@ -118,7 +114,9 @@ class EnhancedCollectionManager {
             });
             
             if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
+                const errorBody = await response.json().catch(() => ({}));
+                const detail = errorBody.detail || errorBody.error || `HTTP ${response.status}`;
+                throw new Error(detail);
             }
             
             const result = await response.json();
@@ -129,7 +127,37 @@ class EnhancedCollectionManager {
         }
     }
     
+    startProgressPolling() {
+        // Close any leftover SSE connection
+        if (this.eventSource) {
+            this.eventSource.close();
+            this.eventSource = null;
+        }
+        // Poll /api/collection_status every 1.5s instead of using SSE
+        this._progressPollInterval = setInterval(async () => {
+            try {
+                const response = await fetch('/api/collection_status');
+                if (!response.ok) return;
+                const data = await response.json();
+                this.updateCollectionStatus(data);
+                if (data.status === 'completed' || data.status === 'error') {
+                    this.stopProgressPolling();
+                }
+            } catch (e) {
+                console.error('Progress poll error:', e);
+            }
+        }, 1500);
+    }
+
+    stopProgressPolling() {
+        if (this._progressPollInterval) {
+            clearInterval(this._progressPollInterval);
+            this._progressPollInterval = null;
+        }
+    }
+
     startProgressTracking() {
+        // Legacy SSE method - kept as fallback but no longer called by default
         this.eventSource = new EventSource('/api/collection-progress');
         
         this.eventSource.onmessage = (event) => {
@@ -239,6 +267,7 @@ class EnhancedCollectionManager {
         // when it receives the completion event from the server
         
         // Set a fallback timeout to ensure UI updates if server-sent events fail
+        this.stopProgressPolling();
         setTimeout(() => {
             if (this.eventSource) {
                 this.collectionStatus.status = 'completed';
@@ -290,6 +319,7 @@ class EnhancedCollectionManager {
         this.collectionStatus.status = 'error';
         this.collectionStatus.errors.push(error.message);
         
+        this.stopProgressPolling();
         if (this.eventSource) {
             this.eventSource.close();
             this.eventSource = null;

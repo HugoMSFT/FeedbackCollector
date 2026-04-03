@@ -62,7 +62,8 @@
         </div>
         <hr>
         
-        <!-- Power BI Report Container - Now prominently displayed first -->
+        <!-- Power BI Report Container - shown only when configured -->
+        {% if powerbi_embed_base_url and powerbi_report_id and powerbi_tenant_id %}
         <div class="powerbi-container" id="powerbiContainer">
             <iframe
                 id="powerbiReport"
@@ -71,6 +72,121 @@
                 allowFullScreen="true">
             </iframe>
         </div>
+        {% else %}
+        <!-- Local Insights Dashboard (when Power BI is not configured) -->
+        <div id="localInsights">
+            <div class="alert alert-info mb-3">
+                <i class="bi bi-info-circle me-2"></i>
+                Showing local insights from collected data. Configure Power BI in <code>.env</code> for advanced reports.
+            </div>
+            <div class="row mb-4">
+                <div class="col-md-3">
+                    <div class="card text-center p-3">
+                        <h3 id="insightTotal" class="text-primary">--</h3>
+                        <small class="text-muted">Total Items</small>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card text-center p-3">
+                        <h3 id="insightSources" class="text-success">--</h3>
+                        <small class="text-muted">Sources</small>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card text-center p-3">
+                        <h3 id="insightBugs" class="text-danger">--</h3>
+                        <small class="text-muted">Bugs</small>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card text-center p-3">
+                        <h3 id="insightFeatures" class="text-warning">--</h3>
+                        <small class="text-muted">Feature Requests</small>
+                    </div>
+                </div>
+            </div>
+            <div class="row mb-4">
+                <div class="col-md-6">
+                    <div class="card p-3">
+                        <h5>Sentiment Breakdown</h5>
+                        <div id="sentimentBreakdown"><em>Loading...</em></div>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="card p-3">
+                        <h5>Top Sources</h5>
+                        <div id="topSources"><em>Loading...</em></div>
+                    </div>
+                </div>
+            </div>
+            <div class="row mb-4">
+                <div class="col-md-12">
+                    <div class="card p-3">
+                        <h5>Top Keywords</h5>
+                        <div id="topKeywords"><em>Loading...</em></div>
+                    </div>
+                </div>
+            </div>
+            <div class="card p-3">
+                <h5>Actionable Insights</h5>
+                <div id="actionableInsights"><em>Loading...</em></div>
+            </div>
+        </div>
+        <script>
+        (function() {
+            fetch('/api/insights/summary')
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('insightTotal').textContent = data.total_feedback || 0;
+                    var sources = data.by_source || {};
+                    document.getElementById('insightSources').textContent = Object.keys(sources).length;
+                    var impacts = data.by_impact || {};
+                    document.getElementById('insightBugs').textContent = impacts['Bug'] || 0;
+                    document.getElementById('insightFeatures').textContent = (impacts['Feature Request'] || 0);
+
+                    // Sentiment
+                    var sentiments = data.by_sentiment || {};
+                    var sentHtml = '<ul class="list-unstyled mb-0">';
+                    for (var s in sentiments) {
+                        var pct = data.total_feedback ? Math.round(sentiments[s] / data.total_feedback * 100) : 0;
+                        var color = s === 'Positive' ? 'success' : s === 'Negative' ? 'danger' : 'secondary';
+                        sentHtml += '<li class="mb-2"><div class="d-flex justify-content-between"><span>' + s + '</span><span>' + sentiments[s] + ' (' + pct + '%)</span></div><div class="progress" style="height:8px"><div class="progress-bar bg-' + color + '" style="width:' + pct + '%"></div></div></li>';
+                    }
+                    sentHtml += '</ul>';
+                    document.getElementById('sentimentBreakdown').innerHTML = sentHtml;
+
+                    // Sources
+                    var srcHtml = '<ul class="list-unstyled mb-0">';
+                    var srcEntries = Object.entries(sources).sort((a,b) => b[1]-a[1]);
+                    srcEntries.forEach(function(e) {
+                        srcHtml += '<li class="d-flex justify-content-between mb-1"><span>' + e[0] + '</span><span class="badge bg-primary">' + e[1] + '</span></li>';
+                    });
+                    srcHtml += '</ul>';
+                    document.getElementById('topSources').innerHTML = srcHtml;
+
+                    // Keywords
+                    var kws = data.top_keywords || [];
+                    var kwHtml = '<div class="d-flex flex-wrap gap-2">';
+                    kws.forEach(function(kw) {
+                        kwHtml += '<span class="badge bg-info text-dark">' + kw[0] + ' (' + kw[1] + ')</span>';
+                    });
+                    kwHtml += '</div>';
+                    document.getElementById('topKeywords').innerHTML = kwHtml || '<em>No data</em>';
+
+                    // Actionable Insights
+                    var insights = data.actionable_insights || [];
+                    var aiHtml = '';
+                    insights.forEach(function(i) {
+                        aiHtml += '<div class="alert alert-' + (i.priority === 'high' ? 'danger' : i.priority === 'medium' ? 'warning' : 'info') + ' py-2 mb-2"><strong>' + i.title + '</strong><br><small>' + i.description + '</small></div>';
+                    });
+                    document.getElementById('actionableInsights').innerHTML = aiHtml || '<em>No insights yet — collect more data.</em>';
+                })
+                .catch(function(e) {
+                    document.getElementById('localInsights').innerHTML = '<div class="alert alert-warning">Could not load insights: ' + e.message + '. Run a collection first.</div>';
+                });
+        })();
+        </script>
+        {% endif %}
     </div>
 
     <!-- Fabric Write Progress Drawer -->

@@ -105,7 +105,7 @@ class EnhancedCollectionManager {
             // block the POST request from being sent.
             this.startProgressPolling();
 
-            const response = await fetch('/api/collect', {
+            const response = await fetch('/api/run-search', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',

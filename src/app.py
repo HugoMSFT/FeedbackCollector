@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Dict, Any
 import json
 
-from collectors import FabricCommunityCollector, GitHubDiscussionsCollector, GitHubIssuesCollector, StackOverflowCollector, MicrosoftQandACollector, TechCommunityCollector, DbtCommunityCollector, SQLServerCentralCollector, MicrosoftFeedbackCollector, DevToCollector, HackerNewsCollector, MSSQLTipsCollector
+from collectors import FabricCommunityCollector, GitHubDiscussionsCollector, GitHubIssuesCollector, StackOverflowCollector, MicrosoftQandACollector, TechCommunityCollector, DbtCommunityCollector, SQLServerCentralCollector, MicrosoftFeedbackCollector, DevToCollector, HackerNewsCollector, MSSQLTipsCollector, AzureUpdatesCollector, RedditCollector, FabricIdeasCollector, SQLShackCollector, SQLAuthorityCollector, TwitterCollector
 from ado_client import get_working_ado_items
 import config
 import utils
@@ -385,7 +385,8 @@ def restore_default_impact_types_route():
         return jsonify({"status": "error", "message": f"An internal error occurred: {str(e)}"}), 500
 
 
-@app.route("/api/collect", methods=["POST"])
+@app.route("/api/run-search", methods=["POST"])
+@app.route("/api/collect", methods=["POST"])  # Legacy alias
 def collect_feedback_route():
     """Enhanced collection route with source configuration support"""
     global last_collected_feedback, last_collection_summary, collection_status
@@ -939,6 +940,139 @@ def collect_feedback_route():
             collection_status["source_counts"]["mssqlTips"] = len(mssqltips_feedback)
             all_feedback.extend(mssqltips_feedback)
             results["mssqlTips"] = {"count": len(mssqltips_feedback), "completed": True}
+
+        # Collect from Azure Updates if enabled
+        if source_configs.get("azureUpdates", {}).get("enabled", False):
+            collection_status["current_source"] = "Azure Updates"
+            collection_status["message"] = "Collecting from Azure Updates..."
+            au_config = source_configs["azureUpdates"]
+            logger.info("☁️ AZURE UPDATES: Collecting feedback")
+            au_collector = AzureUpdatesCollector()
+            au_collector.configure({"max_items": au_config.get("maxItems", 200)})
+            azure_updates_feedback = au_collector.collect()
+            au_collector.close()
+            logger.info(f"Azure Updates collector found {len(azure_updates_feedback)} items.")
+            collection_status["sources_completed"].append("Azure Updates")
+            if total_sources > 0:
+                collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
+            collection_status["source_counts"] = collection_status.get("source_counts", {})
+            collection_status["source_counts"]["azureUpdates"] = len(azure_updates_feedback)
+            all_feedback.extend(azure_updates_feedback)
+            results["azureUpdates"] = {"count": len(azure_updates_feedback), "completed": True}
+
+        # Collect from Server Fault if enabled
+        if source_configs.get("serverFault", {}).get("enabled", False):
+            collection_status["current_source"] = "Server Fault"
+            collection_status["message"] = "Collecting from Server Fault..."
+            sf_config = source_configs["serverFault"]
+            logger.info("🔧 SERVER FAULT: Collecting feedback")
+            sf_collector = StackOverflowCollector(site="serverfault")
+            sf_collector.configure({"max_items": sf_config.get("maxItems", 200)})
+            serverfault_feedback = sf_collector.collect()
+            sf_collector.close()
+            logger.info(f"Server Fault collector found {len(serverfault_feedback)} items.")
+            collection_status["sources_completed"].append("Server Fault")
+            if total_sources > 0:
+                collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
+            collection_status["source_counts"] = collection_status.get("source_counts", {})
+            collection_status["source_counts"]["serverFault"] = len(serverfault_feedback)
+            all_feedback.extend(serverfault_feedback)
+            results["serverFault"] = {"count": len(serverfault_feedback), "completed": True}
+
+        # Collect from Reddit if enabled
+        if source_configs.get("reddit", {}).get("enabled", False):
+            collection_status["current_source"] = "Reddit"
+            collection_status["message"] = "Collecting from Reddit..."
+            rd_config = source_configs["reddit"]
+            logger.info("🟠 REDDIT: Collecting feedback")
+            rd_collector = RedditCollector()
+            rd_collector.configure({"max_items": rd_config.get("maxItems", 200)})
+            reddit_feedback = rd_collector.collect()
+            rd_collector.close()
+            logger.info(f"Reddit collector found {len(reddit_feedback)} items.")
+            collection_status["sources_completed"].append("Reddit")
+            if total_sources > 0:
+                collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
+            collection_status["source_counts"] = collection_status.get("source_counts", {})
+            collection_status["source_counts"]["reddit"] = len(reddit_feedback)
+            all_feedback.extend(reddit_feedback)
+            results["reddit"] = {"count": len(reddit_feedback), "completed": True}
+
+        # Collect from Fabric Ideas if enabled
+        if source_configs.get("fabricIdeas", {}).get("enabled", False):
+            collection_status["current_source"] = "Fabric Ideas"
+            collection_status["message"] = "Collecting from Fabric Ideas..."
+            fi_config = source_configs["fabricIdeas"]
+            logger.info("💡 FABRIC IDEAS: Collecting feedback")
+            fi_collector = FabricIdeasCollector()
+            fi_collector.configure({"max_items": fi_config.get("maxItems", 200)})
+            fabric_ideas_feedback = fi_collector.collect()
+            fi_collector.close()
+            logger.info(f"Fabric Ideas collector found {len(fabric_ideas_feedback)} items.")
+            collection_status["sources_completed"].append("Fabric Ideas")
+            if total_sources > 0:
+                collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
+            collection_status["source_counts"] = collection_status.get("source_counts", {})
+            collection_status["source_counts"]["fabricIdeas"] = len(fabric_ideas_feedback)
+            all_feedback.extend(fabric_ideas_feedback)
+            results["fabricIdeas"] = {"count": len(fabric_ideas_feedback), "completed": True}
+
+        # Collect from SQLShack if enabled
+        if source_configs.get("sqlShack", {}).get("enabled", False):
+            collection_status["current_source"] = "SQLShack"
+            collection_status["message"] = "Collecting from SQLShack..."
+            ss_config = source_configs["sqlShack"]
+            logger.info("📝 SQLSHACK: Collecting feedback")
+            ss_collector = SQLShackCollector()
+            ss_collector.configure({"max_items": ss_config.get("maxItems", 200)})
+            sqlshack_feedback = ss_collector.collect()
+            ss_collector.close()
+            logger.info(f"SQLShack collector found {len(sqlshack_feedback)} items.")
+            collection_status["sources_completed"].append("SQLShack")
+            if total_sources > 0:
+                collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
+            collection_status["source_counts"] = collection_status.get("source_counts", {})
+            collection_status["source_counts"]["sqlShack"] = len(sqlshack_feedback)
+            all_feedback.extend(sqlshack_feedback)
+            results["sqlShack"] = {"count": len(sqlshack_feedback), "completed": True}
+
+        # Collect from SQLAuthority if enabled
+        if source_configs.get("sqlAuthority", {}).get("enabled", False):
+            collection_status["current_source"] = "SQLAuthority"
+            collection_status["message"] = "Collecting from SQLAuthority..."
+            sa_config = source_configs["sqlAuthority"]
+            logger.info("📚 SQLAUTHORITY: Collecting feedback")
+            sa_collector = SQLAuthorityCollector()
+            sa_collector.configure({"max_items": sa_config.get("maxItems", 200)})
+            sqlauthority_feedback = sa_collector.collect()
+            sa_collector.close()
+            logger.info(f"SQLAuthority collector found {len(sqlauthority_feedback)} items.")
+            collection_status["sources_completed"].append("SQLAuthority")
+            if total_sources > 0:
+                collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
+            collection_status["source_counts"] = collection_status.get("source_counts", {})
+            collection_status["source_counts"]["sqlAuthority"] = len(sqlauthority_feedback)
+            all_feedback.extend(sqlauthority_feedback)
+            results["sqlAuthority"] = {"count": len(sqlauthority_feedback), "completed": True}
+
+        # Collect from Twitter/X if enabled
+        if source_configs.get("twitter", {}).get("enabled", False):
+            collection_status["current_source"] = "Twitter/X"
+            collection_status["message"] = "Collecting from Twitter/X..."
+            tw_config = source_configs["twitter"]
+            logger.info("🐦 TWITTER/X: Collecting feedback")
+            tw_collector = TwitterCollector()
+            tw_collector.configure({"max_items": tw_config.get("maxItems", 200)})
+            twitter_feedback = tw_collector.collect()
+            tw_collector.close()
+            logger.info(f"Twitter/X collector found {len(twitter_feedback)} items.")
+            collection_status["sources_completed"].append("Twitter/X")
+            if total_sources > 0:
+                collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
+            collection_status["source_counts"] = collection_status.get("source_counts", {})
+            collection_status["source_counts"]["twitter"] = len(twitter_feedback)
+            all_feedback.extend(twitter_feedback)
+            results["twitter"] = {"count": len(twitter_feedback), "completed": True}
 
         # Apply sentiment analysis to all feedback sources
         def add_sentiment_to_feedback(feedback_list, source_name):
@@ -2480,7 +2614,7 @@ def clear_fabric_token():
 
 @app.route("/test-collect")
 def test_collect_page():
-    """Minimal test page for /api/collect"""
+    """Minimal test page for /api/run-search"""
     return """<!DOCTYPE html>
 <html><head><title>Test Collect</title></head>
 <body>
@@ -2490,7 +2624,7 @@ def test_collect_page():
 <script>
 function doCollect() {
     document.getElementById('out').textContent = 'Sending POST...';
-    fetch('/api/collect', {
+    fetch('/api/run-search', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({sources:{fabricCommunity:{enabled:true,maxItems:5}},settings:{}})

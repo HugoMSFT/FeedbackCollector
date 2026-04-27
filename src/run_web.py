@@ -23,7 +23,14 @@ def main():
     port = int(os.getenv("FLASK_PORT", os.getenv("PORT", "5000")))
     debug = _get_bool_env("FLASK_DEBUG", False)
 
-    access_host = "localhost" if host in {"0.0.0.0", "127.0.0.1"} else host
+    # On macOS, browsers may resolve 'localhost' to IPv6 (::1).
+    # If host is 0.0.0.0 (IPv4-only), the browser's fetch() can fail with
+    # "Failed to fetch" because the server isn't listening on ::1.
+    # Use '::' to listen on both IPv4 and IPv6.
+    if host == "0.0.0.0":
+        host = "::"
+
+    access_host = "localhost" if host in {"0.0.0.0", "127.0.0.1", "::"} else host
     access_url = f"http://{access_host}:{port}"
 
     print("\nStarting web interface for Feedback Collector")

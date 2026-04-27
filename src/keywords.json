@@ -19,6 +19,8 @@
   "sp_addlinkedserver",
   "cross-database query",
   "distributed query",
+  "cross database query",
+  "crossdatabase query",
   "remote query",
   "elastic query",
   "elastic database query",

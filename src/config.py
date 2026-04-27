@@ -106,6 +106,29 @@ DEFAULT_ENHANCED_FEEDBACK_CATEGORIES = {
                 "priority": "high",
                 "feature_area": "Data Virtualization",
             },
+            "CROSS_DATABASE_QUERY": {
+                "name": "Cross Database Query (Azure SQL Database)",
+                "keywords": [
+                    "cross database query",
+                    "cross-database query",
+                    "crossdatabase query",
+                    "cross database",
+                    "cross-database",
+                    "crossdatabase",
+                    "Azure SQL Database cross database",
+                    "Azure SQL DB cross database",
+                    "three-part name",
+                    "cross-database join",
+                    "cross database join",
+                    "query across databases",
+                    "cross db query",
+                    "cross-db query",
+                    "inter-database query",
+                    "multi-database query",
+                ],
+                "priority": "critical",
+                "feature_area": "Data Virtualization",
+            },
         },
     },
     "FILE_FORMAT_ACCESS": {
@@ -562,7 +585,7 @@ PRIORITY_LEVELS = {
 DOMAIN_CATEGORIES = {
     "DATA_VIRTUALIZATION": {
         "name": "Data Virtualization",
-        "description": "OPENROWSET, External Tables, PolyBase, CETAS, and external data access",
+        "description": "OPENROWSET, External Tables, PolyBase, CETAS, cross database queries, and external data access",
         "keywords": [
             "openrowset",
             "external table",
@@ -576,6 +599,12 @@ DOMAIN_CATEGORIES = {
             "data federation",
             "virtual data",
             "federated query",
+            "cross database query",
+            "cross-database query",
+            "crossdatabase query",
+            "cross database",
+            "cross-database",
+            "crossdatabase",
         ],
         "color": "#0078d4",  # Microsoft Blue
     },
@@ -742,6 +771,7 @@ DEFAULT_KEYWORDS = [
     "columnstore",
     "linked server",
     "cross-database",
+    "cross database query",
     "distributed query",
     "elastic query",
     "Azure SQL Database",
@@ -918,12 +948,15 @@ ADDITIONAL_GITHUB_REPOS = [
     {'owner': 'microsoft', 'repo': 'sql-server-samples'},
     {'owner': 'microsoft', 'repo': 'Azure-Samples'},
     {'owner': 'MicrosoftDocs', 'repo': 'sql-docs'},
+    {'owner': 'MicrosoftDocs', 'repo': 'azure-docs'},
+    {'owner': 'Azure', 'repo': 'azure-sql'},
 ]
 
 # Stack Exchange API (no auth required for read)
 STACKEXCHANGE_API_BASE = "https://api.stackexchange.com/2.3"
 STACKOVERFLOW_SITE = "stackoverflow"
 DBA_STACKEXCHANGE_SITE = "dba"
+SERVERFAULT_SITE = "serverfault"
 
 # Microsoft Q&A
 MS_QA_SEARCH_URL = "https://learn.microsoft.com/en-us/answers/search"
@@ -933,6 +966,9 @@ FABRIC_IDEAS_URL = "https://ideas.fabric.microsoft.com"
 
 # Microsoft Tech Community
 TECH_COMMUNITY_URL = "https://techcommunity.microsoft.com"
+
+# Twitter/X API (optional - set TWITTER_BEARER_TOKEN env var to enable)
+TWITTER_BEARER_TOKEN = os.environ.get("TWITTER_BEARER_TOKEN", None)
 
 # Feedback State Management Configuration
 FEEDBACK_STATES = {

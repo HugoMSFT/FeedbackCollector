@@ -19,6 +19,16 @@ class SourceConfigManager {
                         owner: 'microsoft',
                         repo: 'Azure-Samples',
                         enabled: true
+                    },
+                    {
+                        owner: 'MicrosoftDocs',
+                        repo: 'azure-docs',
+                        enabled: true
+                    },
+                    {
+                        owner: 'Azure',
+                        repo: 'azure-sql',
+                        enabled: true
                     }
                 ],
                 state: 'all',
@@ -41,6 +51,16 @@ class SourceConfigManager {
                     {
                         owner: 'microsoft',
                         repo: 'Azure-Samples',
+                        enabled: true
+                    },
+                    {
+                        owner: 'MicrosoftDocs',
+                        repo: 'azure-docs',
+                        enabled: true
+                    },
+                    {
+                        owner: 'Azure',
+                        repo: 'azure-sql',
                         enabled: true
                     }
                 ],
@@ -92,6 +112,35 @@ class SourceConfigManager {
             },
             mssqlTips: {
                 enabled: true,
+                maxItems: 5
+            },
+            azureUpdates: {
+                enabled: true,
+                maxItems: 5
+            },
+            serverFault: {
+                enabled: true,
+                site: 'serverfault',
+                maxItems: 5
+            },
+            reddit: {
+                enabled: true,
+                maxItems: 5
+            },
+            fabricIdeas: {
+                enabled: true,
+                maxItems: 5
+            },
+            sqlShack: {
+                enabled: true,
+                maxItems: 5
+            },
+            sqlAuthority: {
+                enabled: true,
+                maxItems: 5
+            },
+            twitter: {
+                enabled: false,
                 maxItems: 5
             },
             ado: {
@@ -612,6 +661,48 @@ class SourceConfigManager {
                 name: 'MSSQLTips',
                 icon: 'bi bi-lightbulb',
                 description: 'Collect SQL Server tips and articles via RSS'
+            },
+            {
+                id: 'azureUpdates',
+                name: 'Azure Updates',
+                icon: 'bi bi-cloud-arrow-up',
+                description: 'Track Azure service updates and announcements via RSS'
+            },
+            {
+                id: 'serverFault',
+                name: 'Server Fault',
+                icon: 'bi bi-server',
+                description: 'Collect Q&A from Server Fault (sysadmin/DBA community)'
+            },
+            {
+                id: 'reddit',
+                name: 'Reddit',
+                icon: 'bi bi-reddit',
+                description: 'Collect posts from r/SQLServer, r/Azure, r/dataengineering'
+            },
+            {
+                id: 'fabricIdeas',
+                name: 'Fabric Ideas',
+                icon: 'bi bi-lightbulb-fill',
+                description: 'Collect feature ideas from Microsoft Fabric Ideas portal'
+            },
+            {
+                id: 'sqlShack',
+                name: 'SQLShack',
+                icon: 'bi bi-journal-text',
+                description: 'Collect SQL Server articles from SQLShack.com via RSS'
+            },
+            {
+                id: 'sqlAuthority',
+                name: 'SQLAuthority',
+                icon: 'bi bi-book',
+                description: 'Collect SQL articles from SQLAuthority.com (Pinal Dave) via RSS'
+            },
+            {
+                id: 'twitter',
+                name: 'Twitter/X',
+                icon: 'bi bi-twitter-x',
+                description: 'Collect tweets about SQL topics (requires API token)'
             },
             {
                 id: 'ado',

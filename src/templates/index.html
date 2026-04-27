@@ -1467,12 +1467,30 @@
             const resultsDiv = document.getElementById('results');
 
             // Get config from source manager
-            const config = window.sourceConfigManager
-                ? window.sourceConfigManager.getCollectionConfig()
-                : { sources: { fabricCommunity: { enabled: true, maxItems: 5 } }, settings: {} };
+            var config;
+            try {
+                config = window.sourceConfigManager
+                    ? window.sourceConfigManager.getCollectionConfig()
+                    : { sources: { fabricCommunity: { enabled: true, maxItems: 5 } }, settings: {} };
+                console.log('[collectFeedback] config:', JSON.stringify(config).substring(0, 200));
+            } catch (e) {
+                console.error('[collectFeedback] getCollectionConfig error:', e);
+                resultsDiv.innerHTML = '<div class="alert alert-danger">Config error: ' + e.message + '</div>';
+                return;
+            }
 
             if (!config || Object.keys(config.sources).length === 0) {
                 resultsDiv.innerHTML = '<div class="alert alert-warning">Please enable at least one data source</div>';
+                return;
+            }
+
+            var bodyStr;
+            try {
+                bodyStr = JSON.stringify(config);
+                console.log('[collectFeedback] Request body size:', bodyStr.length, 'bytes');
+            } catch (e) {
+                console.error('[collectFeedback] JSON.stringify error:', e);
+                resultsDiv.innerHTML = '<div class="alert alert-danger">JSON error: ' + e.message + '</div>';
                 return;
             }
 
@@ -1481,14 +1499,24 @@
             // Pause background polling to free connection slots
             if (window._collectionStatusPollInterval) {
                 clearInterval(window._collectionStatusPollInterval);
+                window._collectionStatusPollInterval = null;
+                console.log('[collectFeedback] Cleared background polling interval');
             }
 
-            fetch('/api/collect', {
+            // Use AbortController with a generous timeout (10 minutes)
+            var controller = new AbortController();
+            var timeoutId = setTimeout(function() { controller.abort(); }, 600000);
+
+            console.log('[collectFeedback] Sending POST /api/run-search ...');
+            fetch('/api/run-search', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(config)
+                body: bodyStr,
+                signal: controller.signal
             })
             .then(function(response) {
+                console.log('[collectFeedback] Response status:', response.status);
+                clearTimeout(timeoutId);
                 if (!response.ok) {
                     return response.json().then(function(body) {
                         throw new Error(body.detail || body.error || 'HTTP ' + response.status);
@@ -1510,7 +1538,20 @@
                 resultsDiv.innerHTML = html;
             })
             .catch(function(err) {
-                resultsDiv.innerHTML = '<div class="alert alert-danger">Collection failed: ' + err.message + '</div>';
+                clearTimeout(timeoutId);
+                console.error('[collectFeedback] Error:', err.name, err.message, err);
+                var detail = err.message;
+                if (err.name === 'AbortError') {
+                    detail = 'Request timed out (>10 min). Try reducing the number of enabled sources.';
+                } else if (err.name === 'TypeError') {
+                    detail = 'Network error (Failed to fetch). Check browser console (F12) for details. ' +
+                             'Try: 1) Hard-refresh (Cmd+Shift+R), 2) Clear localStorage, 3) Check if an extension blocks the request.';
+                }
+                resultsDiv.innerHTML = '<div class="alert alert-danger">' +
+                    '<h5>Collection failed</h5>' +
+                    '<p>' + detail + '</p>' +
+                    '<small class="text-muted">Error type: ' + err.name + ' | ' + err.message + '</small>' +
+                    '</div>';
             })
             .finally(function() {
                 // Resume background polling
@@ -1548,7 +1589,7 @@
                 // Start progress simulation that's resilient to navigation
                 startCollectionProgressSimulation();
                 
-                fetch('/api/collect', {
+                fetch('/api/run-search', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',

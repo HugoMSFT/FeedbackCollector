@@ -1585,6 +1585,10 @@ class MicrosoftFeedbackCollector:
     def __init__(self):
         self.source_name = "Microsoft Feedback"
         self.search_url = "https://feedback.azure.com/d365community/search"
+        self.product_forums = [
+            "https://feedback.azure.com/d365community/forum/04fe6ee0-3b25-ec11-b6e6-000d3a4f0da0",  # Azure SQL
+            "https://feedback.azure.com/d365community/forum/9df02271-3c25-ec11-b6e6-000d3a4f0da0",  # Azure SQL Database
+        ]
         self.max_items = config.MAX_ITEMS_PER_RUN
         self.session = requests.Session()
         self.session.headers = {
@@ -2209,3 +2213,692 @@ class AzureUpdatesCollector:
 
         logger.info(f"Collected {len(feedback_items)} items from {self.source_name}")
         return feedback_items[:self.max_items]
+
+
+class RedditCollector:
+    """Collects posts from Reddit subreddits via the public JSON API (no auth needed)."""
+
+    def __init__(self):
+        self.source_name = "Reddit"
+        self.subreddits = ["SQLServer", "Azure", "dataengineering"]
+        self.max_items = config.MAX_ITEMS_PER_RUN
+        self.session = requests.Session()
+        self.session.headers = {
+            "User-Agent": "FeedbackCollector/1.0 (SQL Data Virtualization feedback collection)",
+            "Accept": "application/json",
+        }
+
+    def close(self):
+        self.session.close()
+
+    def configure(self, settings: Dict[str, Any]):
+        if "max_items" in settings:
+            self.max_items = settings["max_items"]
+            logger.info(f"RedditCollector configured with max_items={self.max_items}")
+        if "subreddits" in settings:
+            self.subreddits = settings["subreddits"]
+
+    def collect(self) -> List[Dict[str, Any]]:
+        feedback_items = []
+        keywords_to_use = config.KEYWORDS
+
+        if not keywords_to_use:
+            logger.warning(f"{self.source_name}: No keywords configured, skipping.")
+            return []
+
+        logger.info(f"Starting {self.source_name} collection from subreddits: {self.subreddits}")
+
+        seen_ids = set()
+
+        try:
+            for subreddit in self.subreddits:
+                if len(feedback_items) >= self.max_items:
+                    break
+
+                search_keywords = keywords_to_use[:8]
+                for keyword in search_keywords:
+                    if len(feedback_items) >= self.max_items:
+                        break
+
+                    search_url = f"https://www.reddit.com/r/{subreddit}/search.json"
+                    params = {
+                        "q": keyword,
+                        "restrict_sr": "on",
+                        "sort": "relevance",
+                        "t": "year",
+                        "limit": 25,
+                    }
+
+                    logger.info(f"Searching r/{subreddit} for: {keyword}")
+                    try:
+                        response = self.session.get(search_url, params=params, timeout=30)
+                        if response.status_code == 429:
+                            logger.warning(f"{self.source_name}: Rate limited on r/{subreddit}, waiting...")
+                            time.sleep(5)
+                            continue
+                        if response.status_code != 200:
+                            logger.warning(f"{self.source_name}: HTTP {response.status_code} for r/{subreddit}")
+                            continue
+
+                        data = response.json()
+                        posts = data.get("data", {}).get("children", [])
+
+                        for post_wrapper in posts:
+                            if len(feedback_items) >= self.max_items:
+                                break
+
+                            post = post_wrapper.get("data", {})
+                            post_id = post.get("id", "")
+                            if post_id in seen_ids:
+                                continue
+                            seen_ids.add(post_id)
+
+                            title = post.get("title", "")
+                            selftext = post.get("selftext", "")
+                            full_text = f"{title}\n\n{selftext}" if selftext else title
+
+                            matched_keywords = find_matched_keywords(full_text, keywords_to_use)
+                            if not matched_keywords:
+                                continue
+
+                            author = post.get("author", "Anonymous")
+                            created_utc = post.get("created_utc", 0)
+                            created = datetime.fromtimestamp(created_utc, tz=timezone.utc).isoformat() if created_utc else ""
+                            permalink = post.get("permalink", "")
+                            post_url = f"https://www.reddit.com{permalink}" if permalink else ""
+                            score = post.get("score", 0)
+                            num_comments = post.get("num_comments", 0)
+                            subreddit_name = post.get("subreddit", subreddit)
+
+                            gist = generate_feedback_gist(full_text)
+                            enhanced_cat = enhanced_categorize_feedback(
+                                full_text, source=self.source_name, scenario="Customer", organization=f"r/{subreddit_name}"
+                            )
+
+                            feedback_items.append({
+                                "Feedback_Gist": gist,
+                                "Feedback": full_text,
+                                "Url": post_url,
+                                "Matched_Keywords": matched_keywords,
+                                "Area": "SQL Data Virtualization",
+                                "Sources": self.source_name,
+                                "Impacttype": self._determine_impact_type(full_text),
+                                "Scenario": "Customer",
+                                "Customer": author,
+                                "Tag": f"r/{subreddit_name}",
+                                "Created": created,
+                                "Organization": f"r/{subreddit_name}",
+                                "Status": config.DEFAULT_STATUS,
+                                "Created_by": config.SYSTEM_USER,
+                                "Rawfeedback": json.dumps({
+                                    "post_id": post_id,
+                                    "score": score,
+                                    "num_comments": num_comments,
+                                    "subreddit": subreddit_name,
+                                }),
+                                "Sentiment": analyze_sentiment(full_text),
+                                "Category": enhanced_cat["legacy_category"],
+                                "Enhanced_Category": enhanced_cat["primary_category"],
+                                "Subcategory": enhanced_cat["subcategory"],
+                                "Audience": enhanced_cat["audience"],
+                                "Priority": enhanced_cat["priority"],
+                                "Feature_Area": enhanced_cat["feature_area"],
+                                "Categorization_Confidence": enhanced_cat["confidence"],
+                                "Domains": enhanced_cat.get("domains", []),
+                                "Primary_Domain": enhanced_cat.get("primary_domain", None),
+                                "Score": score,
+                            })
+
+                    except Exception as e:
+                        logger.warning(f"{self.source_name}: Error searching r/{subreddit} for '{keyword}': {e}")
+                        continue
+
+                    time.sleep(2)  # Reddit rate limiting
+
+        except Exception as e:
+            logger.error(f"Error collecting from {self.source_name}: {e}", exc_info=True)
+
+        logger.info(f"Collected {len(feedback_items)} items from {self.source_name}")
+        return feedback_items[:self.max_items]
+
+    def _determine_impact_type(self, content: str) -> str:
+        content_lower = content.lower()
+        if any(w in content_lower for w in ["error", "bug", "issue", "problem", "broken"]):
+            return "Bug"
+        if any(w in content_lower for w in ["suggest", "feature", "request", "wish", "would be nice"]):
+            return "Feature Request"
+        if any(w in content_lower for w in ["how to", "how do", "question", "help", "?"]):
+            return "Question"
+        return "Feedback"
+
+
+class FabricIdeasCollector:
+    """Collects feature ideas from the Microsoft Fabric Ideas portal."""
+
+    def __init__(self):
+        self.source_name = "Fabric Ideas"
+        self.base_url = getattr(config, "FABRIC_IDEAS_URL", "https://ideas.fabric.microsoft.com")
+        self.max_items = config.MAX_ITEMS_PER_RUN
+        self.session = requests.Session()
+        self.session.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml",
+        }
+
+    def close(self):
+        self.session.close()
+
+    def configure(self, settings: Dict[str, Any]):
+        if "max_items" in settings:
+            self.max_items = settings["max_items"]
+            logger.info(f"FabricIdeasCollector configured with max_items={self.max_items}")
+
+    def collect(self) -> List[Dict[str, Any]]:
+        feedback_items = []
+        keywords_to_use = config.KEYWORDS
+
+        if not keywords_to_use:
+            logger.warning(f"{self.source_name}: No keywords configured, skipping.")
+            return []
+
+        logger.info(f"Starting {self.source_name} collection")
+
+        try:
+            for keyword in keywords_to_use[:8]:
+                if len(feedback_items) >= self.max_items:
+                    break
+
+                search_url = f"{self.base_url}/search"
+                params = {"q": keyword}
+
+                logger.info(f"Searching {self.source_name} for: {keyword}")
+                try:
+                    response = self.session.get(search_url, params=params, timeout=30)
+                    if response.status_code != 200:
+                        logger.warning(f"{self.source_name}: HTTP {response.status_code} for '{keyword}'")
+                        continue
+
+                    soup = BeautifulSoup(response.text, "html.parser")
+
+                    idea_elements = soup.select(
+                        "div.idea-card, div.idea-list-item, a.idea-title, "
+                        "div[class*='idea'], li[class*='idea'], div[class*='suggestion']"
+                    )
+
+                    for el in idea_elements:
+                        if len(feedback_items) >= self.max_items:
+                            break
+
+                        title_el = el.select_one("a, h3, h2, .title, .idea-title")
+                        if not title_el:
+                            continue
+
+                        title = title_el.get_text(strip=True)
+                        idea_url = title_el.get("href", "")
+                        if idea_url and not idea_url.startswith("http"):
+                            idea_url = f"{self.base_url}{idea_url}"
+
+                        desc_el = el.select_one("p, .description, .summary, .idea-description")
+                        body_text = desc_el.get_text(strip=True) if desc_el else ""
+                        full_text = f"{title}\n\n{body_text}"
+
+                        matched_keywords = find_matched_keywords(full_text, keywords_to_use)
+                        if not matched_keywords:
+                            continue
+
+                        vote_el = el.select_one(".vote-count, .votes, span[class*='vote'], .score")
+                        vote_count = 0
+                        if vote_el:
+                            vote_text = vote_el.get_text(strip=True).replace(",", "")
+                            if vote_text.isdigit():
+                                vote_count = int(vote_text)
+
+                        status_el = el.select_one(".status, .idea-status, span[class*='status']")
+                        idea_status = status_el.get_text(strip=True) if status_el else ""
+
+                        gist = generate_feedback_gist(full_text)
+                        enhanced_cat = enhanced_categorize_feedback(
+                            full_text, source=self.source_name, scenario="Customer", organization=self.source_name
+                        )
+
+                        feedback_items.append({
+                            "Feedback_Gist": gist,
+                            "Feedback": full_text,
+                            "Url": idea_url,
+                            "Matched_Keywords": matched_keywords,
+                            "Area": "SQL Data Virtualization",
+                            "Sources": self.source_name,
+                            "Impacttype": "Feature Request",
+                            "Scenario": "Customer",
+                            "Customer": "Anonymous",
+                            "Tag": idea_status,
+                            "Created": "",
+                            "Organization": self.source_name,
+                            "Status": config.DEFAULT_STATUS,
+                            "Created_by": config.SYSTEM_USER,
+                            "Rawfeedback": json.dumps({"votes": vote_count, "keyword": keyword, "idea_status": idea_status}),
+                            "Sentiment": analyze_sentiment(full_text),
+                            "Category": enhanced_cat["legacy_category"],
+                            "Enhanced_Category": enhanced_cat["primary_category"],
+                            "Subcategory": enhanced_cat["subcategory"],
+                            "Audience": enhanced_cat["audience"],
+                            "Priority": enhanced_cat["priority"],
+                            "Feature_Area": enhanced_cat["feature_area"],
+                            "Categorization_Confidence": enhanced_cat["confidence"],
+                            "Domains": enhanced_cat.get("domains", []),
+                            "Primary_Domain": enhanced_cat.get("primary_domain", None),
+                            "Score": vote_count,
+                        })
+
+                except Exception as e:
+                    logger.warning(f"{self.source_name}: Error searching for '{keyword}': {e}")
+                    continue
+
+                time.sleep(1)
+
+        except Exception as e:
+            logger.error(f"Error collecting from {self.source_name}: {e}", exc_info=True)
+
+        logger.info(f"Collected {len(feedback_items)} items from {self.source_name}")
+        return feedback_items[:self.max_items]
+
+
+class SQLShackCollector:
+    """Collects articles from SQLShack.com via RSS (no auth needed)."""
+
+    def __init__(self):
+        self.source_name = "SQLShack"
+        self.feed_url = "https://www.sqlshack.com/feed/"
+        self.max_items = config.MAX_ITEMS_PER_RUN
+        self.session = requests.Session()
+        self.session.headers = {"User-Agent": "FeedbackCollector/1.0"}
+
+    def close(self):
+        self.session.close()
+
+    def configure(self, settings: Dict[str, Any]):
+        if "max_items" in settings:
+            self.max_items = settings["max_items"]
+            logger.info(f"SQLShackCollector configured with max_items={self.max_items}")
+
+    def collect(self) -> List[Dict[str, Any]]:
+        feedback_items = []
+        keywords_to_use = config.KEYWORDS
+
+        if not keywords_to_use:
+            logger.warning(f"{self.source_name}: No keywords configured, skipping.")
+            return []
+
+        logger.info(f"Starting {self.source_name} collection")
+
+        try:
+            logger.info(f"Fetching RSS: {self.feed_url}")
+            response = self.session.get(self.feed_url, timeout=30)
+            if response.status_code != 200:
+                logger.warning(f"{self.source_name}: HTTP {response.status_code}")
+                return []
+
+            import xml.etree.ElementTree as ET
+            try:
+                root = ET.fromstring(response.content)
+            except ET.ParseError:
+                logger.warning(f"{self.source_name}: Failed to parse XML")
+                return []
+
+            ns = ""
+            if root.tag.startswith("{"):
+                ns = root.tag.split("}")[0] + "}"
+            channel = root.find(f"{ns}channel") or root
+            items = channel.findall(f"{ns}item")
+            logger.info(f"Found {len(items)} RSS items from {self.source_name}")
+
+            for item in items:
+                if len(feedback_items) >= self.max_items:
+                    break
+
+                title_el = item.find(f"{ns}title")
+                title = title_el.text.strip() if title_el is not None and title_el.text else ""
+                desc_el = item.find(f"{ns}description")
+                description = desc_el.text.strip() if desc_el is not None and desc_el.text else ""
+                body_text = BeautifulSoup(description, "html.parser").get_text(separator=" ", strip=True)
+                link_el = item.find(f"{ns}link")
+                link = link_el.text.strip() if link_el is not None and link_el.text else ""
+                pub_el = item.find(f"{ns}pubDate")
+                pub_date = pub_el.text.strip() if pub_el is not None and pub_el.text else ""
+                author_el = item.find("{http://purl.org/dc/elements/1.1/}creator")
+                if author_el is None:
+                    author_el = item.find(f"{ns}author")
+                author = author_el.text.strip() if author_el is not None and author_el.text else "Anonymous"
+
+                full_text = f"{title}\n\n{body_text}"
+
+                matched_keywords = find_matched_keywords(full_text, keywords_to_use)
+                if not matched_keywords:
+                    continue
+
+                gist = generate_feedback_gist(full_text)
+                enhanced_cat = enhanced_categorize_feedback(
+                    full_text, source=self.source_name, scenario="Customer", organization=self.source_name
+                )
+
+                feedback_items.append({
+                    "Feedback_Gist": gist,
+                    "Feedback": full_text,
+                    "Url": link,
+                    "Matched_Keywords": matched_keywords,
+                    "Area": "SQL Data Virtualization",
+                    "Sources": self.source_name,
+                    "Impacttype": self._determine_impact_type(full_text),
+                    "Scenario": "Customer",
+                    "Customer": author,
+                    "Tag": "",
+                    "Created": pub_date,
+                    "Organization": self.source_name,
+                    "Status": config.DEFAULT_STATUS,
+                    "Created_by": config.SYSTEM_USER,
+                    "Rawfeedback": json.dumps({"rss_title": title}),
+                    "Sentiment": analyze_sentiment(full_text),
+                    "Category": enhanced_cat["legacy_category"],
+                    "Enhanced_Category": enhanced_cat["primary_category"],
+                    "Subcategory": enhanced_cat["subcategory"],
+                    "Audience": enhanced_cat["audience"],
+                    "Priority": enhanced_cat["priority"],
+                    "Feature_Area": enhanced_cat["feature_area"],
+                    "Categorization_Confidence": enhanced_cat["confidence"],
+                    "Domains": enhanced_cat.get("domains", []),
+                    "Primary_Domain": enhanced_cat.get("primary_domain", None),
+                })
+
+            time.sleep(1)
+
+        except Exception as e:
+            logger.error(f"Error collecting from {self.source_name}: {e}", exc_info=True)
+
+        logger.info(f"Collected {len(feedback_items)} items from {self.source_name}")
+        return feedback_items[:self.max_items]
+
+    def _determine_impact_type(self, content: str) -> str:
+        content_lower = content.lower()
+        if any(w in content_lower for w in ["error", "bug", "issue", "problem"]):
+            return "Bug"
+        if any(w in content_lower for w in ["suggest", "feature", "improve"]):
+            return "Feature Request"
+        if any(w in content_lower for w in ["how to", "tutorial", "guide"]):
+            return "Question"
+        return "Feedback"
+
+
+class SQLAuthorityCollector:
+    """Collects articles from SQLAuthority.com (Pinal Dave) via RSS (no auth needed)."""
+
+    def __init__(self):
+        self.source_name = "SQLAuthority"
+        self.feed_url = "https://blog.sqlauthority.com/feed/"
+        self.max_items = config.MAX_ITEMS_PER_RUN
+        self.session = requests.Session()
+        self.session.headers = {"User-Agent": "FeedbackCollector/1.0"}
+
+    def close(self):
+        self.session.close()
+
+    def configure(self, settings: Dict[str, Any]):
+        if "max_items" in settings:
+            self.max_items = settings["max_items"]
+            logger.info(f"SQLAuthorityCollector configured with max_items={self.max_items}")
+
+    def collect(self) -> List[Dict[str, Any]]:
+        feedback_items = []
+        keywords_to_use = config.KEYWORDS
+
+        if not keywords_to_use:
+            logger.warning(f"{self.source_name}: No keywords configured, skipping.")
+            return []
+
+        logger.info(f"Starting {self.source_name} collection")
+
+        try:
+            logger.info(f"Fetching RSS: {self.feed_url}")
+            response = self.session.get(self.feed_url, timeout=30)
+            if response.status_code != 200:
+                logger.warning(f"{self.source_name}: HTTP {response.status_code}")
+                return []
+
+            import xml.etree.ElementTree as ET
+            try:
+                root = ET.fromstring(response.content)
+            except ET.ParseError:
+                logger.warning(f"{self.source_name}: Failed to parse XML")
+                return []
+
+            ns = ""
+            if root.tag.startswith("{"):
+                ns = root.tag.split("}")[0] + "}"
+            channel = root.find(f"{ns}channel") or root
+            items = channel.findall(f"{ns}item")
+            logger.info(f"Found {len(items)} RSS items from {self.source_name}")
+
+            for item in items:
+                if len(feedback_items) >= self.max_items:
+                    break
+
+                title_el = item.find(f"{ns}title")
+                title = title_el.text.strip() if title_el is not None and title_el.text else ""
+                desc_el = item.find(f"{ns}description")
+                description = desc_el.text.strip() if desc_el is not None and desc_el.text else ""
+                body_text = BeautifulSoup(description, "html.parser").get_text(separator=" ", strip=True)
+                link_el = item.find(f"{ns}link")
+                link = link_el.text.strip() if link_el is not None and link_el.text else ""
+                pub_el = item.find(f"{ns}pubDate")
+                pub_date = pub_el.text.strip() if pub_el is not None and pub_el.text else ""
+                author_el = item.find("{http://purl.org/dc/elements/1.1/}creator")
+                if author_el is None:
+                    author_el = item.find(f"{ns}author")
+                author = author_el.text.strip() if author_el is not None and author_el.text else "Pinal Dave"
+
+                full_text = f"{title}\n\n{body_text}"
+
+                matched_keywords = find_matched_keywords(full_text, keywords_to_use)
+                if not matched_keywords:
+                    continue
+
+                gist = generate_feedback_gist(full_text)
+                enhanced_cat = enhanced_categorize_feedback(
+                    full_text, source=self.source_name, scenario="Customer", organization=self.source_name
+                )
+
+                feedback_items.append({
+                    "Feedback_Gist": gist,
+                    "Feedback": full_text,
+                    "Url": link,
+                    "Matched_Keywords": matched_keywords,
+                    "Area": "SQL Data Virtualization",
+                    "Sources": self.source_name,
+                    "Impacttype": self._determine_impact_type(full_text),
+                    "Scenario": "Customer",
+                    "Customer": author,
+                    "Tag": "",
+                    "Created": pub_date,
+                    "Organization": self.source_name,
+                    "Status": config.DEFAULT_STATUS,
+                    "Created_by": config.SYSTEM_USER,
+                    "Rawfeedback": json.dumps({"rss_title": title}),
+                    "Sentiment": analyze_sentiment(full_text),
+                    "Category": enhanced_cat["legacy_category"],
+                    "Enhanced_Category": enhanced_cat["primary_category"],
+                    "Subcategory": enhanced_cat["subcategory"],
+                    "Audience": enhanced_cat["audience"],
+                    "Priority": enhanced_cat["priority"],
+                    "Feature_Area": enhanced_cat["feature_area"],
+                    "Categorization_Confidence": enhanced_cat["confidence"],
+                    "Domains": enhanced_cat.get("domains", []),
+                    "Primary_Domain": enhanced_cat.get("primary_domain", None),
+                })
+
+            time.sleep(1)
+
+        except Exception as e:
+            logger.error(f"Error collecting from {self.source_name}: {e}", exc_info=True)
+
+        logger.info(f"Collected {len(feedback_items)} items from {self.source_name}")
+        return feedback_items[:self.max_items]
+
+    def _determine_impact_type(self, content: str) -> str:
+        content_lower = content.lower()
+        if any(w in content_lower for w in ["error", "bug", "issue", "problem"]):
+            return "Bug"
+        if any(w in content_lower for w in ["suggest", "feature", "improve"]):
+            return "Feature Request"
+        if any(w in content_lower for w in ["how to", "tutorial", "guide"]):
+            return "Question"
+        return "Feedback"
+
+
+class TwitterCollector:
+    """Collects tweets about SQL/data virtualization topics.
+
+    Note: Requires Twitter/X API Bearer Token (v2 API).
+    Set TWITTER_BEARER_TOKEN environment variable to enable.
+    Without the token, the collector will skip gracefully.
+    """
+
+    def __init__(self):
+        self.source_name = "Twitter/X"
+        self.api_base = "https://api.twitter.com/2/tweets/search/recent"
+        self.bearer_token = getattr(config, "TWITTER_BEARER_TOKEN", None)
+        self.max_items = config.MAX_ITEMS_PER_RUN
+        self.session = requests.Session()
+        if self.bearer_token:
+            self.session.headers = {
+                "Authorization": f"Bearer {self.bearer_token}",
+                "User-Agent": "FeedbackCollector/1.0",
+            }
+
+    def close(self):
+        self.session.close()
+
+    def configure(self, settings: Dict[str, Any]):
+        if "max_items" in settings:
+            self.max_items = settings["max_items"]
+            logger.info(f"TwitterCollector configured with max_items={self.max_items}")
+
+    def collect(self) -> List[Dict[str, Any]]:
+        feedback_items = []
+
+        if not self.bearer_token:
+            logger.warning(f"{self.source_name}: No TWITTER_BEARER_TOKEN configured, skipping.")
+            return []
+
+        keywords_to_use = config.KEYWORDS
+        if not keywords_to_use:
+            logger.warning(f"{self.source_name}: No keywords configured, skipping.")
+            return []
+
+        logger.info(f"Starting {self.source_name} collection")
+
+        # Build Twitter search query from keywords (limited to 512 chars)
+        search_terms = []
+        for kw in keywords_to_use[:10]:
+            term = f'"{kw}"' if " " in kw else kw
+            search_terms.append(term)
+        query = " OR ".join(search_terms)
+        if len(query) > 512:
+            query = query[:512].rsplit(" OR ", 1)[0]
+
+        try:
+            params = {
+                "query": query,
+                "max_results": min(100, self.max_items),
+                "tweet.fields": "created_at,author_id,public_metrics,text",
+                "expansions": "author_id",
+                "user.fields": "username,name",
+            }
+
+            logger.info(f"Searching {self.source_name} with query: {query[:100]}...")
+            response = self.session.get(self.api_base, params=params, timeout=30)
+
+            if response.status_code == 401:
+                logger.warning(f"{self.source_name}: Invalid bearer token")
+                return []
+            if response.status_code == 429:
+                logger.warning(f"{self.source_name}: Rate limited")
+                return []
+            if response.status_code != 200:
+                logger.warning(f"{self.source_name}: HTTP {response.status_code}")
+                return []
+
+            data = response.json()
+            tweets = data.get("data", [])
+            users = {u["id"]: u for u in data.get("includes", {}).get("users", [])}
+
+            for tweet in tweets:
+                if len(feedback_items) >= self.max_items:
+                    break
+
+                text = tweet.get("text", "")
+                matched_keywords = find_matched_keywords(text, keywords_to_use)
+                if not matched_keywords:
+                    continue
+
+                author_id = tweet.get("author_id", "")
+                user = users.get(author_id, {})
+                username = user.get("username", "Anonymous")
+                created = tweet.get("created_at", "")
+                tweet_id = tweet.get("id", "")
+                tweet_url = f"https://twitter.com/{username}/status/{tweet_id}" if username != "Anonymous" else ""
+                metrics = tweet.get("public_metrics", {})
+                score = metrics.get("like_count", 0) + metrics.get("retweet_count", 0)
+
+                gist = generate_feedback_gist(text)
+                enhanced_cat = enhanced_categorize_feedback(
+                    text, source=self.source_name, scenario="Customer", organization=self.source_name
+                )
+
+                feedback_items.append({
+                    "Feedback_Gist": gist,
+                    "Feedback": text,
+                    "Url": tweet_url,
+                    "Matched_Keywords": matched_keywords,
+                    "Area": "SQL Data Virtualization",
+                    "Sources": self.source_name,
+                    "Impacttype": self._determine_impact_type(text),
+                    "Scenario": "Customer",
+                    "Customer": username,
+                    "Tag": "",
+                    "Created": created,
+                    "Organization": self.source_name,
+                    "Status": config.DEFAULT_STATUS,
+                    "Created_by": config.SYSTEM_USER,
+                    "Rawfeedback": json.dumps({
+                        "tweet_id": tweet_id,
+                        "likes": metrics.get("like_count", 0),
+                        "retweets": metrics.get("retweet_count", 0),
+                        "replies": metrics.get("reply_count", 0),
+                    }),
+                    "Sentiment": analyze_sentiment(text),
+                    "Category": enhanced_cat["legacy_category"],
+                    "Enhanced_Category": enhanced_cat["primary_category"],
+                    "Subcategory": enhanced_cat["subcategory"],
+                    "Audience": enhanced_cat["audience"],
+                    "Priority": enhanced_cat["priority"],
+                    "Feature_Area": enhanced_cat["feature_area"],
+                    "Categorization_Confidence": enhanced_cat["confidence"],
+                    "Domains": enhanced_cat.get("domains", []),
+                    "Primary_Domain": enhanced_cat.get("primary_domain", None),
+                    "Score": score,
+                })
+
+        except Exception as e:
+            logger.error(f"Error collecting from {self.source_name}: {e}", exc_info=True)
+
+        logger.info(f"Collected {len(feedback_items)} items from {self.source_name}")
+        return feedback_items[:self.max_items]
+
+    def _determine_impact_type(self, content: str) -> str:
+        content_lower = content.lower()
+        if any(w in content_lower for w in ["error", "bug", "issue", "broken"]):
+            return "Bug"
+        if any(w in content_lower for w in ["suggest", "feature", "request", "wish"]):
+            return "Feature Request"
+        if any(w in content_lower for w in ["how to", "question", "help", "?"]):
+            return "Question"
+        return "Feedback"

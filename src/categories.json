@@ -84,6 +84,29 @@
         ],
         "priority": "high",
         "feature_area": "Data Virtualization"
+      },
+      "CROSS_DATABASE_QUERY": {
+        "name": "Cross Database Query (Azure SQL Database)",
+        "keywords": [
+          "cross database query",
+          "cross-database query",
+          "crossdatabase query",
+          "cross database",
+          "cross-database",
+          "crossdatabase",
+          "Azure SQL Database cross database",
+          "Azure SQL DB cross database",
+          "three-part name",
+          "cross-database join",
+          "cross database join",
+          "query across databases",
+          "cross db query",
+          "cross-db query",
+          "inter-database query",
+          "multi-database query"
+        ],
+        "priority": "critical",
+        "feature_area": "Data Virtualization"
       }
     }
   },

@@ -1,11 +1,12 @@
-from flask import Flask, render_template, request, jsonify, send_from_directory, current_app
+from flask import Flask, render_template, request, jsonify, send_from_directory, send_file, current_app
 import pandas as pd
 import os
 import logging
 import time
 import threading
+import tempfile
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import json
 
 from collectors import RedditCollector, FabricCommunityCollector, GitHubDiscussionsCollector, GitHubIssuesCollector, StackOverflowCollector, MicrosoftQandACollector, TechCommunityCollector
@@ -13,7 +14,8 @@ from ado_client import get_working_ado_items
 import config
 import utils
 import state_manager
-from runtime_paths import DATA_DIR, STATIC_DIR, TEMPLATES_DIR
+from runtime_paths import DATA_DIR, STATIC_DIR, TEMPLATES_DIR, LOCAL_DB_PATH
+from local_store import LocalStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -42,16 +44,89 @@ collection_status = {
     "current_source": None,
     "sources_completed": [],
     "error_message": None,
+    # Detailed per-source state for the progress drawer.
+    # Shape: {source_key: {label, state, count, message}} where state is one of
+    # "pending" | "running" | "success" | "error" | "skipped".
+    "source_states": {},
 }
+
+
+# Map of internal source key -> human label shown in the UI.
+# Keys mirror the JSON shape posted by the frontend / used in
+# source_counts. Keep both spellings (`dba_stackexchange` and
+# `dbaStackExchange`) since different parts of the codebase use each.
+SOURCE_LABELS = {
+    "reddit": "Reddit",
+    "fabricCommunity": "Fabric Community",
+    "github": "GitHub Discussions",
+    "githubIssues": "GitHub Issues",
+    "github_issues": "GitHub Issues",
+    "ado": "Azure DevOps",
+    "stackoverflow": "Stack Overflow",
+    "dbaStackExchange": "DBA Stack Exchange",
+    "dba_stackexchange": "DBA Stack Exchange",
+    "microsoftQA": "Microsoft Q&A",
+    "techCommunity": "Tech Community",
+}
+
+
+def _set_source_state(
+    key: str,
+    state: str,
+    *,
+    count: Optional[int] = None,
+    message: Optional[str] = None,
+) -> None:
+    """Update the per-source state under ``collection_status["source_states"]``.
+
+    Held under ``_state_lock`` so SSE consumers always see a consistent
+    snapshot. ``state`` is one of ``pending`` / ``running`` / ``success`` /
+    ``error`` / ``skipped``.
+    """
+    with _state_lock:
+        states = collection_status.setdefault("source_states", {})
+        entry = states.get(key, {"label": SOURCE_LABELS.get(key, key)})
+        entry["label"] = SOURCE_LABELS.get(key, entry.get("label", key))
+        entry["state"] = state
+        if count is not None:
+            entry["count"] = count
+        if message is not None:
+            entry["message"] = message
+        states[key] = entry
 
 os.makedirs(DATA_DIR, exist_ok=True)
 logger.info(f"Using data directory: {DATA_DIR}")
 
+# Local SQLite-backed feedback store. Survives process restarts and holds
+# every user edit (state, notes, domain, category, audience). On first run,
+# we seed it from the most recent feedback_*.csv so existing users don't
+# start from an empty table.
+local_store = LocalStore(LOCAL_DB_PATH)
+_seed_summary = local_store.import_legacy_csv_if_empty(DATA_DIR)
+if _seed_summary:
+    logger.info(
+        f"LocalStore seeded from legacy CSV: new={_seed_summary['new']}, "
+        f"updated={_seed_summary['updated']}, total={_seed_summary['total']}"
+    )
+
 
 def load_latest_feedback_from_csv():
-    """Load feedback from the most recent CSV file if in-memory data is empty"""
+    """Load feedback for the in-memory cache.
+
+    Source-of-truth is the local SQLite store. We fall back to the most
+    recent CSV snapshot only if the DB happens to be empty (e.g. fresh
+    install, manual data wipe).
+    """
     try:
-        # Get all CSV files in the data directory
+        items = local_store.load_all()
+        if items:
+            logger.info(f"Loaded {len(items)} feedback items from local store")
+            return items
+    except Exception as e:
+        logger.error(f"Error loading from local store: {e}")
+
+    # CSV fallback (legacy behaviour, kept for safety).
+    try:
         csv_files = [f for f in os.listdir(DATA_DIR) if f.startswith("feedback_") and f.endswith(".csv")]
         if not csv_files:
             return []
@@ -60,7 +135,7 @@ def load_latest_feedback_from_csv():
         latest_file = sorted(csv_files)[-1]
         filepath = os.path.join(DATA_DIR, latest_file)
 
-        logger.info(f"Loading feedback from CSV: {filepath}")
+        logger.info(f"Loading feedback from CSV fallback: {filepath}")
         df = pd.read_csv(filepath, encoding="utf-8-sig")
 
         # Replace NaN with None to avoid JSON serialization issues and sorting errors
@@ -387,7 +462,69 @@ def restore_default_impact_types_route():
 
 @app.route("/api/collect", methods=["POST"])
 def collect_feedback_route():
-    """Enhanced collection route with source configuration support"""
+    """Kick off a collection run in a background thread and return immediately.
+
+    The actual scrape can take minutes per source. If we ran it inline the
+    browser's fetch would either block the UI for that long or - on slow
+    networks / dev-server timeouts - fail with a generic ``TypeError: Failed
+    to fetch``. By dispatching the work to a worker thread we return 202
+    Accepted right away. The frontend already drives progress and the final
+    result via the ``/api/collection-progress`` SSE stream.
+    """
+    global last_collected_feedback, last_collection_summary, collection_status
+
+    # Refuse to start a second collection while one is already running.
+    with _state_lock:
+        if collection_status.get("status") == "running":
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": "A collection is already in progress.",
+                    }
+                ),
+                409,
+            )
+
+    # Use Flask's helper so request/session globals work inside the thread.
+    from flask import copy_current_request_context
+
+    @copy_current_request_context
+    def _worker():
+        try:
+            _collect_feedback_body()
+        except Exception as exc:  # noqa: BLE001 - last-line safety net
+            logger.error("Collection worker crashed", exc_info=True)
+            with _state_lock:
+                collection_status.update(
+                    {
+                        "status": "error",
+                        "message": "Collection crashed",
+                        "end_time": datetime.now().isoformat(),
+                        "error_message": f"Internal error: {exc}",
+                    }
+                )
+
+    threading.Thread(target=_worker, name="feedback-collection", daemon=True).start()
+
+    return (
+        jsonify(
+            {
+                "status": "started",
+                "message": "Collection started. Watch progress in the Progress drawer.",
+            }
+        ),
+        202,
+    )
+
+
+def _collect_feedback_body():
+    """Original collection logic. Runs on a worker thread.
+
+    Side effects: mutates the module-level ``collection_status`` so the SSE
+    stream picks up progress, then sets ``status`` to ``completed`` or
+    ``error`` at the end. Return value is ignored - the frontend reads SSE.
+    """
     global last_collected_feedback, last_collection_summary, collection_status
 
     with _state_lock:
@@ -410,6 +547,7 @@ def collect_feedback_route():
                 "error_message": None,
                 "progress": 0,
                 "source_counts": {},
+                "source_states": {},
         }
     )
 
@@ -441,46 +579,75 @@ def collect_feedback_route():
         # Prevent division by zero
         if total_sources == 0:
             logger.warning("No sources enabled for collection")
-            collection_status.update(
-                {
-                    "status": "error",
-                    "message": "No sources enabled for collection",
-                    "end_time": datetime.now().isoformat(),
-                    "error_message": "Please enable at least one data source",
-                }
-            )
-            return jsonify({"error": "No sources enabled for collection"}), 400
+            with _state_lock:
+                collection_status.update(
+                    {
+                        "status": "error",
+                        "message": "No sources enabled for collection",
+                        "end_time": datetime.now().isoformat(),
+                        "error_message": "Please enable at least one data source",
+                    }
+                )
+            return
 
         logger.info(f"📋 COLLECTION CONFIG: {total_sources} sources enabled: {enabled_sources}")
 
-        # Pre-flight validation for configured sources
+        # Pre-flight validation for configured sources.
+        #
+        # Don't fail the entire collection if Reddit is misconfigured -
+        # quietly drop it from this run and tell the user what happened
+        # via collection_status. The other sources can still produce
+        # useful data even when Reddit credentials are absent.
+        skipped_sources: Dict[str, str] = {}
         if "reddit" in enabled_sources:
             if (
                 not config.REDDIT_CLIENT_ID
                 or not config.REDDIT_CLIENT_SECRET
                 or not config.REDDIT_USER_AGENT
             ):
-                logger.error("❌ Reddit enabled but credentials missing")
+                msg = (
+                    "Reddit is enabled but credentials are missing - skipping. "
+                    "Add REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, and REDDIT_USER_AGENT "
+                    "to .env to include Reddit in future runs."
+                )
+                logger.warning(f"⚠️ {msg}")
+                skipped_sources["reddit"] = msg
+                # Mutate the request copy so the rest of the function sees
+                # Reddit as disabled.
+                if isinstance(source_configs.get("reddit"), dict):
+                    source_configs["reddit"] = {
+                        **source_configs["reddit"],
+                        "enabled": False,
+                    }
+                enabled_sources = [s for s in enabled_sources if s != "reddit"]
+                total_sources = len(enabled_sources)
+
+        if total_sources == 0:
+            logger.warning("All enabled sources are unusable (skipped during pre-flight)")
+            with _state_lock:
                 collection_status.update(
                     {
                         "status": "error",
                         "message": "Collection failed",
                         "end_time": datetime.now().isoformat(),
                         "error_message": (
-                            "❌ Reddit is enabled but credentials are missing. "
-                            "Add REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, and REDDIT_USER_AGENT to .env file."
+                            "All enabled sources were skipped. "
+                            + " ".join(skipped_sources.values())
                         ),
                     }
                 )
-                return (
-                    jsonify(
-                        {
-                            "error": "Reddit credentials not configured",
-                            "detail": "REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, or REDDIT_USER_AGENT is missing",
-                        }
-                    ),
-                    400,
-                )
+            return
+
+        if skipped_sources:
+            with _state_lock:
+                collection_status["skipped_sources"] = skipped_sources
+            for skipped_key, skipped_msg in skipped_sources.items():
+                _set_source_state(skipped_key, "skipped", count=0, message=skipped_msg)
+
+        # Seed every enabled source as "pending" so the UI shows them
+        # immediately, even before the first scrape starts.
+        for source_key in enabled_sources:
+            _set_source_state(source_key, "pending", count=0)
 
         # Reload keywords, categories, and impact types from files before collection
         # This ensures we use the latest configuration set via the web UI
@@ -512,6 +679,7 @@ def collect_feedback_route():
         if source_configs.get("reddit", {}).get("enabled", False):
             collection_status["current_source"] = "Reddit"
             collection_status["message"] = "Collecting from Reddit..."
+            _set_source_state("reddit", "running", message="Collecting...")
             reddit_config = source_configs["reddit"]
             subreddits = reddit_config.get("subreddits", [reddit_config.get("subreddit", "SQLServer")])
             logger.info(f"🔴 REDDIT: Collecting from {subreddits}")
@@ -539,11 +707,18 @@ def collect_feedback_route():
             collection_status["source_counts"]["reddit"] = len(reddit_feedback)
             all_feedback.extend(reddit_feedback)
             results["reddit"] = {"count": len(reddit_feedback), "completed": True}
+            _set_source_state(
+                "reddit",
+                "success",
+                count=len(reddit_feedback),
+                message=f"{len(reddit_feedback)} items collected",
+            )
 
         # Collect from Fabric Community if enabled
         if source_configs.get("fabricCommunity", {}).get("enabled", False):
             collection_status["current_source"] = "Fabric Community"
             collection_status["message"] = "Collecting from Fabric Community..."
+            _set_source_state("fabricCommunity", "running", message="Collecting...")
             fabric_config = source_configs["fabricCommunity"]
             logger.info(f"🔷 FABRIC COMMUNITY: Collecting feedback")
 
@@ -564,11 +739,18 @@ def collect_feedback_route():
             collection_status["source_counts"]["fabricCommunity"] = len(fabric_feedback)
             all_feedback.extend(fabric_feedback)
             results["fabricCommunity"] = {"count": len(fabric_feedback), "completed": True}
+            _set_source_state(
+                "fabricCommunity",
+                "success",
+                count=len(fabric_feedback),
+                message=f"{len(fabric_feedback)} items collected",
+            )
 
         # Collect from GitHub if enabled
         if source_configs.get("github", {}).get("enabled", False):
             collection_status["current_source"] = "GitHub Discussions"
             collection_status["message"] = "Collecting from GitHub Discussions..."
+            _set_source_state("github", "running", message="Collecting...")
             github_config = source_configs["github"]
 
             # Get list of repositories to collect from
@@ -627,11 +809,18 @@ def collect_feedback_route():
             collection_status["source_counts"]["github"] = len(github_feedback)
             all_feedback.extend(github_feedback)
             results["github"] = {"count": len(github_feedback), "completed": True, "repositories": len(enabled_repos)}
+            _set_source_state(
+                "github",
+                "success",
+                count=len(github_feedback),
+                message=f"{len(github_feedback)} items from {len(enabled_repos)} repos",
+            )
 
         # Collect from GitHub Issues if enabled
         if source_configs.get("githubIssues", {}).get("enabled", False):
             collection_status["current_source"] = "GitHub Issues"
             collection_status["message"] = "Collecting from GitHub Issues..."
+            _set_source_state("githubIssues", "running", message="Collecting...")
             github_issues_config = source_configs["githubIssues"]
 
             # Get list of repositories to collect from
@@ -682,6 +871,12 @@ def collect_feedback_route():
             # Add source counts for real-time updates
             collection_status["source_counts"] = collection_status.get("source_counts", {})
             collection_status["source_counts"]["github_issues"] = len(github_issues_feedback)
+            _set_source_state(
+                "githubIssues",
+                "success",
+                count=len(github_issues_feedback),
+                message=f"{len(github_issues_feedback)} items from {len(enabled_repos)} repos",
+            )
             all_feedback.extend(github_issues_feedback)
             results["githubIssues"] = {
                 "count": len(github_issues_feedback),
@@ -693,6 +888,7 @@ def collect_feedback_route():
         if source_configs.get('ado', {}).get('enabled', False):
             collection_status['current_source'] = 'Azure DevOps'
             collection_status['message'] = 'Collecting from Azure DevOps...'
+            _set_source_state("ado", "running", message="Collecting...")
             ado_config = source_configs['ado']
             # Use ado_config from frontend first, fallback to environment config (cfg module)
             parent_work_item_id = ado_config.get('parentWorkItem') or cfg.ADO_PARENT_WORK_ITEM_ID or '1319103'
@@ -783,6 +979,12 @@ def collect_feedback_route():
             # Add source counts for real-time updates
             collection_status["source_counts"] = collection_status.get("source_counts", {})
             collection_status["source_counts"]["ado"] = len(ado_feedback)
+            _set_source_state(
+                "ado",
+                "success",
+                count=len(ado_feedback),
+                message=f"{len(ado_feedback)} items collected",
+            )
             all_feedback.extend(ado_feedback)
             results["ado"] = {"count": len(ado_feedback), "completed": True}
 
@@ -796,6 +998,7 @@ def collect_feedback_route():
         if source_configs.get("stackoverflow", {}).get("enabled", False):
             collection_status["current_source"] = "Stack Overflow"
             collection_status["message"] = "Collecting from Stack Overflow..."
+            _set_source_state("stackoverflow", "running", message="Collecting...")
             so_config = source_configs["stackoverflow"]
             logger.info("📚 STACK OVERFLOW: Collecting feedback")
 
@@ -810,6 +1013,12 @@ def collect_feedback_route():
                 collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
             collection_status["source_counts"] = collection_status.get("source_counts", {})
             collection_status["source_counts"]["stackoverflow"] = len(stackoverflow_feedback)
+            _set_source_state(
+                "stackoverflow",
+                "success",
+                count=len(stackoverflow_feedback),
+                message=f"{len(stackoverflow_feedback)} items collected",
+            )
             all_feedback.extend(stackoverflow_feedback)
             results["stackoverflow"] = {"count": len(stackoverflow_feedback), "completed": True}
 
@@ -817,6 +1026,7 @@ def collect_feedback_route():
         if source_configs.get("dbaStackExchange", {}).get("enabled", False):
             collection_status["current_source"] = "DBA Stack Exchange"
             collection_status["message"] = "Collecting from DBA Stack Exchange..."
+            _set_source_state("dbaStackExchange", "running", message="Collecting...")
             dba_config = source_configs["dbaStackExchange"]
             logger.info("🗄️ DBA STACK EXCHANGE: Collecting feedback")
 
@@ -831,6 +1041,12 @@ def collect_feedback_route():
                 collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
             collection_status["source_counts"] = collection_status.get("source_counts", {})
             collection_status["source_counts"]["dbaStackExchange"] = len(dba_stackexchange_feedback)
+            _set_source_state(
+                "dba_stackexchange",
+                "success",
+                count=len(dba_stackexchange_feedback),
+                message=f"{len(dba_stackexchange_feedback)} items collected",
+            )
             all_feedback.extend(dba_stackexchange_feedback)
             results["dbaStackExchange"] = {"count": len(dba_stackexchange_feedback), "completed": True}
 
@@ -838,6 +1054,7 @@ def collect_feedback_route():
         if source_configs.get("microsoftQA", {}).get("enabled", False):
             collection_status["current_source"] = "Microsoft Q&A"
             collection_status["message"] = "Collecting from Microsoft Q&A..."
+            _set_source_state("microsoftQA", "running", message="Collecting...")
             msqa_config = source_configs["microsoftQA"]
             logger.info("❓ MICROSOFT Q&A: Collecting feedback")
 
@@ -852,6 +1069,12 @@ def collect_feedback_route():
                 collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
             collection_status["source_counts"] = collection_status.get("source_counts", {})
             collection_status["source_counts"]["microsoftQA"] = len(msqa_feedback)
+            _set_source_state(
+                "microsoftQA",
+                "success",
+                count=len(msqa_feedback),
+                message=f"{len(msqa_feedback)} items collected",
+            )
             all_feedback.extend(msqa_feedback)
             results["microsoftQA"] = {"count": len(msqa_feedback), "completed": True}
 
@@ -859,6 +1082,7 @@ def collect_feedback_route():
         if source_configs.get("techCommunity", {}).get("enabled", False):
             collection_status["current_source"] = "Tech Community"
             collection_status["message"] = "Collecting from Microsoft Tech Community..."
+            _set_source_state("techCommunity", "running", message="Collecting...")
             tc_config = source_configs["techCommunity"]
             logger.info("💬 TECH COMMUNITY: Collecting feedback")
 
@@ -873,6 +1097,12 @@ def collect_feedback_route():
                 collection_status["progress"] = (len(collection_status["sources_completed"]) / total_sources) * 100
             collection_status["source_counts"] = collection_status.get("source_counts", {})
             collection_status["source_counts"]["techCommunity"] = len(techcommunity_feedback)
+            _set_source_state(
+                "techCommunity",
+                "success",
+                count=len(techcommunity_feedback),
+                message=f"{len(techcommunity_feedback)} items collected",
+            )
             all_feedback.extend(techcommunity_feedback)
             results["techCommunity"] = {"count": len(techcommunity_feedback), "completed": True}
 
@@ -944,6 +1174,27 @@ def collect_feedback_route():
         for feedback_item in all_feedback:
             state_manager.initialize_feedback_state(feedback_item)
 
+        # Persist to local SQLite store. This is the primary durable
+        # backend; user edits made between collections are preserved by
+        # LocalStore's merge rules (state, notes, and user-modified
+        # categorisation are never overwritten by collection runs).
+        try:
+            upsert_summary = local_store.upsert_feedback_items(all_feedback)
+            logger.info(
+                f"📦 LOCAL STORE: inserted={upsert_summary['inserted']}, "
+                f"updated={upsert_summary['updated']}, skipped={upsert_summary['skipped']}"
+            )
+            # Re-hydrate the in-memory list from the joined DB view so any
+            # previously-saved user edits (state/notes/category overrides)
+            # appear immediately in the UI for items that were re-collected.
+            merged = local_store.load_all()
+            collected_ids = {item.get("Feedback_ID") for item in all_feedback if item.get("Feedback_ID")}
+            merged_for_session = [m for m in merged if m.get("Feedback_ID") in collected_ids]
+            if merged_for_session:
+                all_feedback = merged_for_session
+        except Exception as e:
+            logger.error(f"Failed to persist feedback to local store: {e}", exc_info=True)
+
         last_collected_feedback = all_feedback
         last_collection_summary = {
             "reddit": {"count": len(reddit_feedback), "completed": True},
@@ -961,7 +1212,19 @@ def collect_feedback_route():
 
         if not all_feedback:
             logger.info("No feedback items collected in this run.")
-            return jsonify(last_collection_summary)
+            with _state_lock:
+                collection_status.update(
+                    {
+                        "status": "completed",
+                        "message": "Collection completed - no items found",
+                        "end_time": datetime.now().isoformat(),
+                        "total_items": 0,
+                        "current_source": "Completed",
+                        "progress": 100,
+                        "results": results,
+                    }
+                )
+            return
 
         # Save to CSV
         try:
@@ -984,7 +1247,13 @@ def collect_feedback_route():
             df.to_csv(filepath, index=False, encoding="utf-8-sig")
             logger.info(f"Feedback saved to {filepath}")
 
-            current_app.config["LAST_CSV_FILE"] = filename
+            # Stash the most recent CSV name on the app config so other
+            # routes can reference it. Wrap in a try because this worker
+            # may run outside an active request context.
+            try:
+                current_app.config["LAST_CSV_FILE"] = filename
+            except RuntimeError:
+                app.config["LAST_CSV_FILE"] = filename
 
             # Add filename to summary for download link
             last_collection_summary["csv_filename"] = filename
@@ -992,30 +1261,32 @@ def collect_feedback_route():
         except Exception as e:
             logger.error(f"Error processing or saving feedback to CSV: {e}", exc_info=True)
             # Update status to error
-            collection_status.update(
-                {
-                    "status": "error",
-                    "message": "Error saving feedback to CSV",
-                    "end_time": datetime.now().isoformat(),
-                    "error_message": str(e),
-                }
-            )
-            return jsonify({**last_collection_summary, "csv_error": str(e)}), 500
+            with _state_lock:
+                collection_status.update(
+                    {
+                        "status": "error",
+                        "message": "Error saving feedback to CSV",
+                        "end_time": datetime.now().isoformat(),
+                        "error_message": str(e),
+                    }
+                )
+            return
 
         # Update status to completed
-        collection_status.update(
-            {
-                "status": "completed",
-                "message": f"Collection completed successfully - {len(all_feedback)} items collected",
-                "end_time": datetime.now().isoformat(),
-                "total_items": len(all_feedback),
-                "current_source": "Completed",
-                "progress": 100,
-                "results": results,  # Include results for client display
-            }
-        )
+        with _state_lock:
+            collection_status.update(
+                {
+                    "status": "completed",
+                    "message": f"Collection completed successfully - {len(all_feedback)} items collected",
+                    "end_time": datetime.now().isoformat(),
+                    "total_items": len(all_feedback),
+                    "current_source": "Completed",
+                    "progress": 100,
+                    "results": results,  # Include results for client display
+                }
+            )
 
-        return jsonify(last_collection_summary)
+        return
 
     except Exception as e:
         import traceback
@@ -1058,25 +1329,23 @@ def collect_feedback_route():
         logger.error(f"Error in collection route: {e}")
         logger.error(f"Full traceback:\n{full_traceback}")
 
-        # Update status to error
-        collection_status.update(
-            {
-                "status": "error",
-                "message": "Collection failed",
-                "end_time": datetime.now().isoformat(),
-                "error_message": error_msg,
-            }
-        )
-        return (
-            jsonify(
+        # Update status to error. Any source that was still ``running`` when
+        # the exception fired is now in an unknown state - flag it as error
+        # so the drawer doesn't show a perpetual spinner next to it.
+        with _state_lock:
+            for src_key, src_entry in collection_status.get("source_states", {}).items():
+                if src_entry.get("state") in ("running", "pending"):
+                    src_entry["state"] = "error"
+                    src_entry["message"] = error_msg
+            collection_status.update(
                 {
-                    "error": error_msg,
-                    "detail": str(e),
-                    "traceback": full_traceback if config.FLASK_DEBUG else None,
+                    "status": "error",
+                    "message": "Collection failed",
+                    "end_time": datetime.now().isoformat(),
+                    "error_message": error_msg,
                 }
-            ),
-            500,
-        )
+            )
+        return
 
 
 @app.route("/feedback")
@@ -2411,19 +2680,49 @@ def clear_fabric_token():
 
 @app.route("/api/collection-progress")
 def collection_progress():
-    """Server-Sent Events endpoint for real-time collection progress"""
+    """Server-Sent Events endpoint for real-time collection progress.
+
+    Streams the latest ``collection_status`` snapshot to the browser. The
+    loop exits when:
+      * the collection finishes (``status`` is ``completed`` or ``error``), or
+      * the client disconnects (``GeneratorExit``), or
+      * we have been idling in ``ready`` state for ``IDLE_TIMEOUT`` seconds
+        (so a stray EventSource that nobody triggered a collection from
+        does not pin a worker thread forever).
+    """
+
+    IDLE_TIMEOUT = 60  # seconds of "ready" status before we hang up
+    POLL_INTERVAL = 1.0
 
     def generate():
-        while True:
-            yield f"data: {json.dumps(collection_status)}\n\n"
+        idle_started = time.monotonic() if collection_status.get("status") == "ready" else None
+        try:
+            while True:
+                with _state_lock:
+                    snapshot = dict(collection_status)
+                yield f"data: {json.dumps(snapshot)}\n\n"
 
-            # Stop streaming AFTER sending the final status
-            if collection_status.get("status") in ["completed", "error"]:
-                break
+                status = snapshot.get("status")
+                if status in ("completed", "error"):
+                    break
 
-            time.sleep(1)
+                if status == "ready":
+                    if idle_started is None:
+                        idle_started = time.monotonic()
+                    elif time.monotonic() - idle_started >= IDLE_TIMEOUT:
+                        break
+                else:
+                    idle_started = None
 
-    return app.response_class(generate(), mimetype="text/event-stream")
+                time.sleep(POLL_INTERVAL)
+        except GeneratorExit:
+            # Client disconnected; let the thread exit cleanly.
+            return
+
+    response = app.response_class(generate(), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
 
 
 @app.route("/api/collection_status", methods=["GET"])
@@ -2706,21 +3005,8 @@ def sync_with_fabric():
 
 @app.route("/api/feedback/state/update", methods=["POST"])
 def update_feedback_state_sql():
-    """Update a single feedback state and immediately sync to SQL"""
+    """Update a single feedback state in the local SQLite store."""
     try:
-        # Validate session and authentication
-        from flask import session
-
-        stored_token = session.get("fabric_bearer_token")
-        has_bearer_token = stored_token and stored_token.strip() and stored_token != "None"
-
-        if not has_bearer_token:
-            logger.warning("❌ STATE UPDATE DENIED: No valid bearer token in session")
-            return (
-                jsonify({"status": "error", "message": "Not connected to Fabric. Please sync with Fabric first."}),
-                403,
-            )
-
         # Get request data
         data = request.get_json()
         if not data:
@@ -2737,46 +3023,35 @@ def update_feedback_state_sql():
         if new_state and not state_manager.validate_state(new_state):
             return jsonify({"status": "error", "message": f"Invalid state: {new_state}"}), 400
 
-        # Import SQL writer and update immediately
-        import fabric_sql_writer
+        # Persist locally.
+        local_store.update_state(
+            feedback_id,
+            state=data.get("state"),
+            notes=data.get("notes"),
+            primary_domain=data.get("domain"),
+            updated_by=data.get("updated_by") or "user",
+        )
 
-        # Create state change record
-        state_change = {
-            "feedback_id": feedback_id,
-            "state": data.get("state"),
-            "notes": data.get("notes"),
-            "domain": data.get("domain"),
-            "updated_by": "user",  # TODO: Get from session or context
-        }
+        # Update in-memory cache so the UI reflects the change immediately.
+        global last_collected_feedback
+        for item in last_collected_feedback:
+            if item.get("Feedback_ID") == feedback_id:
+                if "state" in data and data["state"] is not None:
+                    item["State"] = data["state"]
+                if "notes" in data and data["notes"] is not None:
+                    item["Feedback_Notes"] = data["notes"]
+                if "domain" in data and data["domain"] is not None:
+                    item["Primary_Domain"] = data["domain"]
+                item["Last_Updated"] = datetime.now().isoformat()
+                break
 
-        # Remove None values
-        state_change = {k: v for k, v in state_change.items() if v is not None}
-
-        logger.info(f"🔄 Updating state for feedback {feedback_id}: {state_change}")
-
-        # Write to SQL database immediately
-        writer = fabric_sql_writer.FabricSQLWriter()
-        success = writer.update_feedback_states([state_change], use_token=False)
-
-        if success:
-            logger.info(f"✅ Successfully updated feedback {feedback_id} in SQL database")
-
-            # Update in-memory cache
-            global last_collected_feedback
-            for item in last_collected_feedback:
-                if item.get("Feedback_ID") == feedback_id:
-                    if "state" in data:
-                        item["State"] = data["state"]
-                    if "notes" in data:
-                        item["Feedback_Notes"] = data["notes"]
-                    if "domain" in data:
-                        item["Primary_Domain"] = data["domain"]
-                    item["Last_Updated"] = datetime.now().isoformat()
-                    break
-
-            return jsonify({"status": "success", "message": "State updated successfully", "feedback_id": feedback_id})
-        else:
-            return jsonify({"status": "error", "message": "Failed to update state in SQL database"}), 500
+        return jsonify(
+            {
+                "status": "success",
+                "message": "State updated successfully",
+                "feedback_id": feedback_id,
+            }
+        )
 
     except Exception as e:
         logger.error(f"Error updating feedback state: {e}")
@@ -2785,7 +3060,7 @@ def update_feedback_state_sql():
 
 @app.route("/api/feedback/domain", methods=["POST"])
 def update_feedback_domain():
-    """Update the primary domain of a feedback item"""
+    """Update the primary domain of a feedback item in the local store."""
     try:
         # Get request data
         data = request.get_json()
@@ -2806,43 +3081,31 @@ def update_feedback_domain():
 
         logger.info(f"🔄 Updating domain for feedback {feedback_id}: {new_domain}")
 
-        # Import SQL writer and update immediately
-        import fabric_sql_writer
+        # Persist locally.
+        local_store.update_state(
+            feedback_id,
+            primary_domain=new_domain,
+            updated_by="user",
+            mark_user_modified=True,
+        )
 
-        # Create state change record for domain update
-        state_change = {
-            "feedback_id": feedback_id,
-            "domain": new_domain,
-            "updated_by": "user",  # TODO: Get from session or context
-        }
+        # Update in-memory cache.
+        global last_collected_feedback
+        for item in last_collected_feedback:
+            if item.get("Feedback_ID") == feedback_id:
+                item["Primary_Domain"] = new_domain
+                item["Last_Updated"] = datetime.now().isoformat()
+                item["User_Modified_Categorization"] = True
+                break
 
-        logger.info(f"🔄 Updating domain for feedback {feedback_id}: {state_change}")
-
-        # Write to SQL database immediately
-        writer = fabric_sql_writer.FabricSQLWriter()
-        success = writer.update_feedback_states([state_change], use_token=False)
-
-        if success:
-            logger.info(f"✅ Successfully updated domain for feedback {feedback_id} in SQL database")
-
-            # Update in-memory cache
-            global last_collected_feedback
-            for item in last_collected_feedback:
-                if item.get("Feedback_ID") == feedback_id:
-                    item["Primary_Domain"] = new_domain
-                    item["Last_Updated"] = datetime.now().isoformat()
-                    break
-
-            return jsonify(
-                {
-                    "status": "success",
-                    "message": f"Feedback domain updated to {new_domain}",
-                    "feedback_id": feedback_id,
-                    "domain": new_domain,
-                }
-            )
-        else:
-            return jsonify({"status": "error", "message": "Failed to update domain in SQL database"}), 500
+        return jsonify(
+            {
+                "status": "success",
+                "message": f"Feedback domain updated to {new_domain}",
+                "feedback_id": feedback_id,
+                "domain": new_domain,
+            }
+        )
 
     except Exception as e:
         logger.error(f"Error updating feedback domain: {e}")
@@ -2851,21 +3114,8 @@ def update_feedback_domain():
 
 @app.route("/api/feedback/notes", methods=["POST"])
 def update_feedback_notes():
-    """Update the notes of a feedback item"""
+    """Update the notes of a feedback item in the local store."""
     try:
-        # Validate session and authentication
-        from flask import session
-
-        stored_token = session.get("fabric_bearer_token")
-        has_bearer_token = stored_token and stored_token.strip() and stored_token != "None"
-
-        if not has_bearer_token:
-            logger.warning("❌ NOTES UPDATE DENIED: No valid bearer token in session")
-            return (
-                jsonify({"status": "error", "message": "Not connected to Fabric. Please sync with Fabric first."}),
-                403,
-            )
-
         # Get request data
         data = request.get_json()
         if not data:
@@ -2879,47 +3129,25 @@ def update_feedback_notes():
 
         logger.info(f"🔄 NOTES UPDATE REQUEST: Updating {feedback_id} notes: {notes[:50]}...")
 
-        # Import SQL writer and update immediately
-        import fabric_sql_writer
+        # Persist locally.
+        local_store.update_state(feedback_id, notes=notes, updated_by="user")
 
-        # Create state change record for notes update
-        state_change = {
-            "feedback_id": feedback_id,
-            "notes": notes,
-            "updated_by": "user",  # TODO: Get from session or context
-        }
+        # Update in-memory cache.
+        global last_collected_feedback
+        for item in last_collected_feedback:
+            if item.get("Feedback_ID") == feedback_id:
+                item["Feedback_Notes"] = notes
+                item["Last_Updated"] = datetime.now().isoformat()
+                break
 
-        logger.info(f"🔄 Updating notes for feedback {feedback_id}: {state_change}")
-
-        # Write to SQL database immediately
-        writer = fabric_sql_writer.FabricSQLWriter()
-        success = writer.update_feedback_states([state_change], use_token=False)
-
-        if success:
-            logger.info(f"✅ Successfully updated notes for feedback {feedback_id} in SQL database")
-
-            # Update in-memory cache
-            global last_collected_feedback
-            for item in last_collected_feedback:
-                if item.get("Feedback_ID") == feedback_id:
-                    item["Feedback_Notes"] = notes
-                    item["Last_Updated"] = datetime.now().isoformat()
-                    break
-
-            return jsonify(
-                {
-                    "status": "success",
-                    "message": "Notes updated successfully",
-                    "feedback_id": feedback_id,
-                    "notes": notes,
-                }
-            )
-        else:
-            return jsonify({"status": "error", "message": "Failed to update notes in SQL database"}), 500
-
-    except Exception as e:
-        logger.error(f"Error updating feedback notes: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify(
+            {
+                "status": "success",
+                "message": "Notes updated successfully",
+                "feedback_id": feedback_id,
+                "notes": notes,
+            }
+        )
 
     except Exception as e:
         logger.error(f"Error updating feedback notes: {e}")
@@ -2928,22 +3156,9 @@ def update_feedback_notes():
 
 @app.route("/api/update_domain_sql", methods=["POST"])
 def update_domain_sql():
-    """Update feedback domain directly in SQL database"""
+    """Update feedback domain in the local store (legacy endpoint name)."""
     try:
-        # Validate session and authentication
-        from flask import session
-
-        stored_token = session.get("fabric_bearer_token")
-        has_bearer_token = stored_token and stored_token.strip() and stored_token != "None"
-
-        if not has_bearer_token:
-            logger.warning("❌ DOMAIN UPDATE DENIED: No valid bearer token in session")
-            return (
-                jsonify({"success": False, "message": "Not connected to Fabric. Please sync with Fabric first."}),
-                403,
-            )
-
-        data = request.get_json()
+        data = request.get_json() or {}
         feedback_id = data.get("feedback_id")
         new_domain = data.get("new_domain")
 
@@ -2959,21 +3174,26 @@ def update_domain_sql():
 
         # Map internal domain code to friendly name for storage
         domain_mapping = {code: details["name"] for code, details in config.DOMAIN_CATEGORIES.items()}
-
-        # Convert internal code to friendly name
         friendly_domain_name = domain_mapping.get(new_domain, new_domain)
 
-        # Update in Fabric SQL database using state_manager (no bearer token needed)
-        success = state_manager.update_feedback_field_in_sql(feedback_id, "Primary_Domain", friendly_domain_name, None)
+        # Persist locally.
+        local_store.update_state(
+            feedback_id,
+            primary_domain=friendly_domain_name,
+            updated_by="user",
+            mark_user_modified=True,
+        )
 
-        if success:
-            logger.info(
-                f"✅ Successfully updated domain for {feedback_id} to {friendly_domain_name} (from {new_domain})"
-            )
-            return jsonify({"success": True, "message": f"Domain updated to {friendly_domain_name}"})
-        else:
-            logger.error(f"❌ Failed to update domain in database for {feedback_id}")
-            return jsonify({"success": False, "message": "Failed to update domain in database"}), 500
+        # In-memory cache.
+        global last_collected_feedback
+        for item in last_collected_feedback:
+            if item.get("Feedback_ID") == feedback_id:
+                item["Primary_Domain"] = friendly_domain_name
+                item["Last_Updated"] = datetime.now().isoformat()
+                item["User_Modified_Categorization"] = True
+                break
+
+        return jsonify({"success": True, "message": f"Domain updated to {friendly_domain_name}"})
 
     except Exception as e:
         logger.error(f"Error updating domain: {e}")
@@ -2982,20 +3202,8 @@ def update_domain_sql():
 
 @app.route("/api/update_category_sql", methods=["POST"])
 def update_category_sql():
-    """Update feedback category/subcategory metadata directly in SQL."""
+    """Update feedback category/subcategory metadata in the local store."""
     try:
-        from flask import session
-
-        stored_token = session.get("fabric_bearer_token")
-        has_bearer_token = stored_token and stored_token.strip() and stored_token != "None"
-
-        if not has_bearer_token:
-            logger.warning("❌ CATEGORY UPDATE DENIED: No valid bearer token in session")
-            return (
-                jsonify({"success": False, "message": "Not connected to Fabric. Please sync with Fabric first."}),
-                403,
-            )
-
         data = request.get_json() or {}
         feedback_id = data.get("feedback_id")
 
@@ -3019,21 +3227,42 @@ def update_category_sql():
             logger.info(f"Resolved domain code '{domain_code}' to name '{domain_name}'")
             domain_code = domain_name
 
-        success = state_manager.update_feedback_category_in_sql(
-            feedback_id, category_name, subcategory_name, feature_area, domain_code
+        # Persist locally.
+        local_store.update_state(
+            feedback_id,
+            category=category_name,
+            enhanced_category=category_name,
+            subcategory=subcategory_name,
+            feature_area=feature_area,
+            primary_domain=domain_code,
+            updated_by="user",
+            mark_user_modified=True,
         )
 
-        if success:
-            friendly_category = category_name or "None"
-            message = f"Category updated to {friendly_category}"
-            if subcategory_name:
-                message += f" → {subcategory_name}"
-            if domain_code:
-                message += f" | Domain: {domain_code}"
-            return jsonify({"success": True, "message": message})
+        # In-memory cache.
+        global last_collected_feedback
+        for item in last_collected_feedback:
+            if item.get("Feedback_ID") == feedback_id:
+                if category_name is not None:
+                    item["Category"] = category_name
+                    item["Enhanced_Category"] = category_name
+                if subcategory_name is not None:
+                    item["Subcategory"] = subcategory_name
+                if feature_area is not None:
+                    item["Feature_Area"] = feature_area
+                if domain_code is not None:
+                    item["Primary_Domain"] = domain_code
+                item["Last_Updated"] = datetime.now().isoformat()
+                item["User_Modified_Categorization"] = True
+                break
 
-        logger.error(f"❌ Failed to update category metadata in database for {feedback_id}")
-        return jsonify({"success": False, "message": "Failed to update category in database"}), 500
+        friendly_category = category_name or "None"
+        message = f"Category updated to {friendly_category}"
+        if subcategory_name:
+            message += f" → {subcategory_name}"
+        if domain_code:
+            message += f" | Domain: {domain_code}"
+        return jsonify({"success": True, "message": message})
 
     except Exception as e:
         logger.error(f"Error updating category metadata: {e}", exc_info=True)
@@ -3042,22 +3271,9 @@ def update_category_sql():
 
 @app.route("/api/update_audience_sql", methods=["POST"])
 def update_audience_sql():
-    """Update feedback audience directly in SQL database"""
+    """Update feedback audience in the local store."""
     try:
-        # Validate session and authentication
-        from flask import session
-
-        stored_token = session.get("fabric_bearer_token")
-        has_bearer_token = stored_token and stored_token.strip() and stored_token != "None"
-
-        if not has_bearer_token:
-            logger.warning("❌ AUDIENCE UPDATE DENIED: No valid bearer token in session")
-            return (
-                jsonify({"success": False, "message": "Not connected to Fabric. Please sync with Fabric first."}),
-                403,
-            )
-
-        data = request.get_json()
+        data = request.get_json() or {}
         feedback_id = data.get("feedback_id")
         new_audience = data.get("new_audience")
 
@@ -3071,15 +3287,24 @@ def update_audience_sql():
         if new_audience not in valid_audiences:
             return jsonify({"success": False, "message": f"Invalid audience. Must be one of: {valid_audiences}"}), 400
 
-        # Update in Fabric SQL database using state_manager (no bearer token needed)
-        success = state_manager.update_feedback_field_in_sql(feedback_id, "Audience", new_audience, None)
+        # Persist locally.
+        local_store.update_state(
+            feedback_id,
+            audience=new_audience,
+            updated_by="user",
+            mark_user_modified=True,
+        )
 
-        if success:
-            logger.info(f"✅ Successfully updated audience for {feedback_id} to {new_audience}")
-            return jsonify({"success": True, "message": f"Audience updated to {new_audience}"})
-        else:
-            logger.error(f"❌ Failed to update audience in database for {feedback_id}")
-            return jsonify({"success": False, "message": "Failed to update audience in database"}), 500
+        # In-memory cache.
+        global last_collected_feedback
+        for item in last_collected_feedback:
+            if item.get("Feedback_ID") == feedback_id:
+                item["Audience"] = new_audience
+                item["Last_Updated"] = datetime.now().isoformat()
+                item["User_Modified_Categorization"] = True
+                break
+
+        return jsonify({"success": True, "message": f"Audience updated to {new_audience}"})
 
     except Exception as e:
         logger.error(f"Error updating audience: {e}")
@@ -3356,6 +3581,154 @@ def download_csv(filename):
     except Exception as e:
         logger.error(f"Error serving CSV file {filename}: {e}")
         return jsonify({"error": "Error serving file"}), 500
+
+
+@app.route("/api/feedback/export", methods=["GET", "POST"])
+def export_feedback_csv():
+    """Export the entire local store to a timestamped CSV file.
+
+    Query/body params:
+        download: "true" (default) returns the file as an attachment,
+                  "false" writes it under DATA_DIR and returns the path.
+    """
+    try:
+        params: Dict[str, Any] = {}
+        if request.method == "POST" and request.is_json:
+            params = request.get_json() or {}
+        else:
+            params = request.args.to_dict()
+
+        download = str(params.get("download", "true")).lower() in {"1", "true", "yes"}
+
+        expected_columns = getattr(config, "TABLE_COLUMNS", None) or getattr(config, "EXPECTED_COLUMNS", None)
+        filepath = local_store.export_to_csv(DATA_DIR, columns=expected_columns)
+        filename = os.path.basename(filepath)
+        # Track the most recent export so the dashboard can link to it.
+        current_app.config["LAST_CSV_FILE"] = filename
+        item_count = local_store.count()
+
+        if download:
+            return send_from_directory(
+                DATA_DIR,
+                filename,
+                as_attachment=True,
+                download_name=filename,
+                mimetype="text/csv",
+            )
+
+        return jsonify(
+            {
+                "status": "success",
+                "filename": filename,
+                "path": filepath,
+                "item_count": item_count,
+                "download_url": f"/data/{filename}",
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Error exporting feedback to CSV: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/feedback/import", methods=["POST"])
+def import_feedback_csv():
+    """Import a CSV (e.g. an earlier export) into the local store.
+
+    Accepts either:
+        - multipart/form-data with a ``file`` field and optional ``mode`` field
+        - JSON body with ``filename`` (must already exist under DATA_DIR)
+          and optional ``mode``
+
+    ``mode`` controls duplicate handling:
+        - ``"merge"`` (default): refresh content columns for existing IDs
+          but keep their existing state row.
+        - ``"skip_existing"``: leave existing IDs untouched.
+        - ``"overwrite"``: replace both content and state columns.
+    """
+    try:
+        global last_collected_feedback
+
+        mode = "merge"
+        upload_path: Optional[str] = None
+        cleanup_after = False
+
+        if request.files and "file" in request.files:
+            uploaded = request.files["file"]
+            if not uploaded.filename:
+                return jsonify({"status": "error", "message": "Empty filename"}), 400
+            if not uploaded.filename.lower().endswith(".csv"):
+                return jsonify({"status": "error", "message": "Only CSV uploads are supported"}), 400
+            mode = (request.form.get("mode") or "merge").lower()
+
+            tmp_dir = tempfile.mkdtemp(prefix="fc_import_")
+            upload_path = os.path.join(tmp_dir, "upload.csv")
+            uploaded.save(upload_path)
+            cleanup_after = True
+        else:
+            payload = request.get_json(silent=True) or {}
+            mode = (payload.get("mode") or "merge").lower()
+            requested = payload.get("filename")
+            if not requested:
+                return jsonify({"status": "error", "message": "Provide a CSV file or filename"}), 400
+            # Resolve filename safely against DATA_DIR.
+            safe_name = os.path.basename(requested)
+            candidate = os.path.realpath(os.path.join(DATA_DIR, safe_name))
+            if not candidate.startswith(os.path.realpath(DATA_DIR)) or not os.path.exists(candidate):
+                return jsonify({"status": "error", "message": "File not found in data directory"}), 404
+            upload_path = candidate
+
+        try:
+            summary = local_store.import_from_csv(upload_path, mode=mode)
+        finally:
+            if cleanup_after and upload_path and os.path.exists(upload_path):
+                try:
+                    os.remove(upload_path)
+                    os.rmdir(os.path.dirname(upload_path))
+                except OSError:
+                    pass
+
+        # Refresh in-memory cache so the UI reflects the import.
+        try:
+            last_collected_feedback = local_store.load_all()
+        except Exception as cache_err:
+            logger.warning(f"Could not refresh in-memory cache after import: {cache_err}")
+
+        return jsonify(
+            {
+                "status": "success",
+                "mode": mode,
+                "summary": summary,
+                "total_items": local_store.count(),
+            }
+        )
+
+    except FileNotFoundError as e:
+        return jsonify({"status": "error", "message": f"File not found: {e}"}), 404
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        logger.error(f"Error importing feedback CSV: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/feedback/store/info", methods=["GET"])
+def feedback_store_info():
+    """Lightweight introspection of the local store - used by the UI."""
+    try:
+        total = local_store.count()
+        user_modified = len(local_store.get_user_modified_ids())
+        return jsonify(
+            {
+                "status": "success",
+                "total_items": total,
+                "user_modified_items": user_modified,
+                "db_path": LOCAL_DB_PATH,
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error reading store info: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/api/insights/topic-aggregation")

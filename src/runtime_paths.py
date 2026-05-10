@@ -14,10 +14,29 @@ PROJECT_ROOT = get_project_root()
 
 def _select_source_dir():
     if getattr(sys, "frozen", False):
-        bundled_src_dir = os.path.join(PROJECT_ROOT, "src")
-        if os.path.isdir(bundled_src_dir):
-            return bundled_src_dir
+        # PyInstaller 6+ (onedir) places bundled data under
+        # ``<dist>/<App>/_internal/src/`` and exposes that path via
+        # ``sys._MEIPASS``. Older versions and onefile builds place
+        # data directly under ``PROJECT_ROOT`` or in a temp extraction
+        # dir. Probe both so a single binary works across layouts.
+        candidates = []
 
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(os.path.join(meipass, "src"))
+            candidates.append(meipass)
+
+        candidates.extend([
+            os.path.join(PROJECT_ROOT, "_internal", "src"),
+            os.path.join(PROJECT_ROOT, "src"),
+        ])
+
+        for candidate in candidates:
+            if os.path.isdir(candidate) and os.path.isdir(os.path.join(candidate, "templates")):
+                return candidate
+
+        # Last-resort fallback so module import doesn't crash; the Flask
+        # app will surface a clearer error if templates are truly missing.
         return PROJECT_ROOT
 
     return os.path.join(PROJECT_ROOT, "src")
@@ -27,6 +46,7 @@ SRC_DIR = _select_source_dir()
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 TEMPLATES_DIR = os.path.join(SRC_DIR, "templates")
 STATIC_DIR = os.path.join(SRC_DIR, "static")
+LOCAL_DB_PATH = os.path.join(DATA_DIR, "feedback_store.db")
 
 
 def get_env_candidates():

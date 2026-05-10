@@ -850,10 +850,11 @@ DOMAIN_CATEGORIES = {
 # Table Schema
 TABLE_COLUMNS = [
     "Feedback_ID",  # NEW: Unique identifier for each feedback item
+    "Sources",  # Moved up so users opening the CSV see the source immediately.
+    "Url",  # Moved up alongside Sources for the same reason.
     "Feedback_Gist",
     "Feedback",
     "Area",
-    "Sources",
     "Impacttype",
     "Scenario",
     "Category",  # Legacy category field for backward compatibility
@@ -877,12 +878,30 @@ TABLE_COLUMNS = [
     "Status",
     "Created_by",
     "Sentiment",
-    "Url",
     "Rawfeedback",
 ]
 
 # Keywords file path
+#
+# Two locations are tracked for taxonomy state (keywords, categories,
+# impact types):
+#   * ``*_FILE``       – the bundled copy under ``src/`` shipped with the
+#                        codebase / PyInstaller bundle. Read-only at
+#                        runtime for frozen builds because it lives inside
+#                        the immutable ``_MEIPASS`` extraction folder.
+#   * ``USER_*_FILE``  – a writable copy under ``data/`` (next to the SQLite
+#                        store). Customizations the user makes in the
+#                        Taxonomy tab are written here so they survive:
+#                          - application restarts,
+#                          - PyInstaller frozen builds (where ``src/`` is
+#                            read-only),
+#                          - source-tree upgrades / re-pulls.
+#
+# ``load_*`` functions prefer the user copy, falling back to the bundled
+# copy, then to the in-code defaults. ``save_*`` always writes to the
+# user copy.
 KEYWORDS_FILE = os.path.join(SRC_DIR, "keywords.json")
+USER_KEYWORDS_FILE = os.path.join(DATA_DIR, "keywords.json")
 
 # Default keywords
 DEFAULT_KEYWORDS = [
@@ -898,152 +917,160 @@ DEFAULT_KEYWORDS = [
 
 
 def save_keywords(keywords_to_save):
+    """Persist keywords to the user-writable copy under ``DATA_DIR``.
+
+    The bundled copy under ``SRC_DIR`` is never modified so that
+    re-deploys / re-installs don't clobber user customizations and frozen
+    builds (where ``SRC_DIR`` is read-only) still succeed.
+    """
     try:
-        with open(KEYWORDS_FILE, "w") as f:
+        os.makedirs(os.path.dirname(USER_KEYWORDS_FILE), exist_ok=True)
+        with open(USER_KEYWORDS_FILE, "w", encoding="utf-8") as f:
             json.dump(keywords_to_save, f, indent=2)
     except Exception as e:
-        print(f"Error saving keywords to '{KEYWORDS_FILE}': {e}")
+        print(f"Error saving keywords to '{USER_KEYWORDS_FILE}': {e}")
+
+
+def _read_keywords_file(path):
+    """Read a keywords JSON file. Returns the list, or None if unusable."""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        if not content.strip():
+            return None
+        loaded = json.loads(content)
+        if isinstance(loaded, list):
+            return loaded
+        print(f"Warning: Content of '{path}' is not a list. Ignoring.")
+        return None
+    except json.JSONDecodeError as e:
+        print(f"Error decoding JSON from '{path}': {e}. Ignoring.")
+        return None
+    except Exception as e:
+        print(f"Unexpected error reading '{path}': {e}. Ignoring.")
+        return None
 
 
 def load_keywords():
-    if os.path.exists(KEYWORDS_FILE):
-        try:
-            with open(KEYWORDS_FILE, "r") as f:
-                content = f.read()
-                if not content.strip():  # Handles empty file
-                    print(f"Warning: '{KEYWORDS_FILE}' is empty. Using default keywords and saving them to the file.")
-                    save_keywords(DEFAULT_KEYWORDS)
-                    return DEFAULT_KEYWORDS.copy()  # Return a copy
-                # Attempt to parse non-empty content
-                loaded_kws = json.loads(content)
-                if isinstance(loaded_kws, list):
-                    return loaded_kws  # Return the user-defined list (could be empty [])
-                else:
-                    print(
-                        f"Warning: Content of '{KEYWORDS_FILE}' is not a list. Using default keywords and overwriting the file."
-                    )
-                    save_keywords(DEFAULT_KEYWORDS)
-                    return DEFAULT_KEYWORDS.copy()
-        except json.JSONDecodeError as e:
-            print(f"Error decoding JSON from '{KEYWORDS_FILE}': {e}. Overwriting with default keywords.")
-            save_keywords(DEFAULT_KEYWORDS)  # Overwrite corrupted file
-            return DEFAULT_KEYWORDS.copy()
-        except Exception as e:
-            print(
-                f"Unexpected error loading '{KEYWORDS_FILE}': {e}. Using default keywords for this session and attempting to save defaults to file."
-            )
-            try:
-                save_keywords(DEFAULT_KEYWORDS)
-            except Exception as save_e:
-                print(f"Could not save default keywords to '{KEYWORDS_FILE}' after load error: {save_e}")
-            return DEFAULT_KEYWORDS.copy()
-    else:  # File doesn't exist
-        print(f"'{KEYWORDS_FILE}' not found. Creating with default keywords.")
-        save_keywords(DEFAULT_KEYWORDS)
-        return DEFAULT_KEYWORDS.copy()
+    """Load keywords with cascade: user copy → bundled copy → defaults.
+
+    On first call when only the bundled copy or defaults are available, a
+    user copy is seeded so future saves have a consistent location.
+    """
+    # 1. Prefer the user-writable copy under DATA_DIR.
+    user_kws = _read_keywords_file(USER_KEYWORDS_FILE)
+    if user_kws is not None:
+        return user_kws
+
+    # 2. Fall back to the bundled copy under SRC_DIR.
+    bundled_kws = _read_keywords_file(KEYWORDS_FILE)
+    if bundled_kws is not None:
+        # Seed the user copy so subsequent saves land in DATA_DIR.
+        save_keywords(bundled_kws)
+        return bundled_kws
+
+    # 3. Fall back to the in-code defaults and seed the user copy.
+    print(
+        f"No keywords file found at '{USER_KEYWORDS_FILE}' or '{KEYWORDS_FILE}'. "
+        "Seeding from DEFAULT_KEYWORDS."
+    )
+    save_keywords(DEFAULT_KEYWORDS)
+    return DEFAULT_KEYWORDS.copy()
 
 
 # Initialize keywords - This is loaded once when the module is imported.
 # For dynamic updates during runtime for collectors, app.py will call load_keywords() again.
 KEYWORDS = load_keywords()
 
-# Categories and Impact Types file paths
+# Categories and Impact Types file paths.
+# Bundled (read-only on frozen builds) vs. user-writable copy under DATA_DIR.
+# See the comment above ``KEYWORDS_FILE`` for the rationale.
 CATEGORIES_FILE = os.path.join(SRC_DIR, "categories.json")
+USER_CATEGORIES_FILE = os.path.join(DATA_DIR, "categories.json")
 IMPACT_TYPES_FILE = os.path.join(SRC_DIR, "impact_types.json")
+USER_IMPACT_TYPES_FILE = os.path.join(DATA_DIR, "impact_types.json")
 
 
 def save_categories(categories_to_save):
-    """Save custom categories configuration to JSON file."""
+    """Save custom categories configuration to the user-writable JSON file."""
     try:
-        with open(CATEGORIES_FILE, "w") as f:
+        os.makedirs(os.path.dirname(USER_CATEGORIES_FILE), exist_ok=True)
+        with open(USER_CATEGORIES_FILE, "w", encoding="utf-8") as f:
             json.dump(categories_to_save, f, indent=2)
     except Exception as e:
-        print(f"Error saving categories to '{CATEGORIES_FILE}': {e}")
+        print(f"Error saving categories to '{USER_CATEGORIES_FILE}': {e}")
+
+
+def _read_json_dict_file(path):
+    """Read a JSON file expected to contain a dict. Returns dict, or None."""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        if not content.strip():
+            return None
+        loaded = json.loads(content)
+        if isinstance(loaded, dict):
+            return loaded
+        print(f"Warning: Content of '{path}' is not a dict. Ignoring.")
+        return None
+    except json.JSONDecodeError as e:
+        print(f"Error decoding JSON from '{path}': {e}. Ignoring.")
+        return None
+    except Exception as e:
+        print(f"Unexpected error reading '{path}': {e}. Ignoring.")
+        return None
 
 
 def load_categories():
-    """Load categories configuration from JSON file, or use defaults."""
-    if os.path.exists(CATEGORIES_FILE):
-        try:
-            with open(CATEGORIES_FILE, "r") as f:
-                content = f.read()
-                if not content.strip():
-                    print(
-                        f"Warning: '{CATEGORIES_FILE}' is empty. Using default categories and saving them to the file."
-                    )
-                    save_categories(DEFAULT_ENHANCED_FEEDBACK_CATEGORIES)
-                    return DEFAULT_ENHANCED_FEEDBACK_CATEGORIES.copy()
-                loaded_cats = json.loads(content)
-                if isinstance(loaded_cats, dict):
-                    return loaded_cats
-                else:
-                    print(
-                        f"Warning: Content of '{CATEGORIES_FILE}' is not a dict. Using default categories and overwriting the file."
-                    )
-                    save_categories(DEFAULT_ENHANCED_FEEDBACK_CATEGORIES)
-                    return DEFAULT_ENHANCED_FEEDBACK_CATEGORIES.copy()
-        except json.JSONDecodeError as e:
-            print(f"Error decoding JSON from '{CATEGORIES_FILE}': {e}. Overwriting with default categories.")
-            save_categories(DEFAULT_ENHANCED_FEEDBACK_CATEGORIES)
-            return DEFAULT_ENHANCED_FEEDBACK_CATEGORIES.copy()
-        except Exception as e:
-            print(f"Unexpected error loading '{CATEGORIES_FILE}': {e}. Using default categories for this session.")
-            try:
-                save_categories(DEFAULT_ENHANCED_FEEDBACK_CATEGORIES)
-            except Exception as save_e:
-                print(f"Could not save default categories to '{CATEGORIES_FILE}' after load error: {save_e}")
-            return DEFAULT_ENHANCED_FEEDBACK_CATEGORIES.copy()
-    else:
-        print(f"'{CATEGORIES_FILE}' not found. Creating with default categories.")
-        save_categories(DEFAULT_ENHANCED_FEEDBACK_CATEGORIES)
-        return DEFAULT_ENHANCED_FEEDBACK_CATEGORIES.copy()
+    """Load categories with cascade: user copy → bundled copy → defaults."""
+    user_cats = _read_json_dict_file(USER_CATEGORIES_FILE)
+    if user_cats is not None:
+        return user_cats
+
+    bundled_cats = _read_json_dict_file(CATEGORIES_FILE)
+    if bundled_cats is not None:
+        save_categories(bundled_cats)
+        return bundled_cats
+
+    print(
+        f"No categories file found at '{USER_CATEGORIES_FILE}' or '{CATEGORIES_FILE}'. "
+        "Seeding from DEFAULT_ENHANCED_FEEDBACK_CATEGORIES."
+    )
+    save_categories(DEFAULT_ENHANCED_FEEDBACK_CATEGORIES)
+    return DEFAULT_ENHANCED_FEEDBACK_CATEGORIES.copy()
 
 
 def save_impact_types(impact_types_to_save):
-    """Save custom impact types configuration to JSON file."""
+    """Save custom impact types configuration to the user-writable JSON file."""
     try:
-        with open(IMPACT_TYPES_FILE, "w") as f:
+        os.makedirs(os.path.dirname(USER_IMPACT_TYPES_FILE), exist_ok=True)
+        with open(USER_IMPACT_TYPES_FILE, "w", encoding="utf-8") as f:
             json.dump(impact_types_to_save, f, indent=2)
     except Exception as e:
-        print(f"Error saving impact types to '{IMPACT_TYPES_FILE}': {e}")
+        print(f"Error saving impact types to '{USER_IMPACT_TYPES_FILE}': {e}")
 
 
 def load_impact_types():
-    """Load impact types configuration from JSON file, or use defaults."""
-    if os.path.exists(IMPACT_TYPES_FILE):
-        try:
-            with open(IMPACT_TYPES_FILE, "r") as f:
-                content = f.read()
-                if not content.strip():
-                    print(
-                        f"Warning: '{IMPACT_TYPES_FILE}' is empty. Using default impact types and saving them to the file."
-                    )
-                    save_impact_types(IMPACT_TYPES)
-                    return IMPACT_TYPES.copy()
-                loaded_types = json.loads(content)
-                if isinstance(loaded_types, dict):
-                    return loaded_types
-                else:
-                    print(
-                        f"Warning: Content of '{IMPACT_TYPES_FILE}' is not a dict. Using default impact types and overwriting the file."
-                    )
-                    save_impact_types(IMPACT_TYPES)
-                    return IMPACT_TYPES.copy()
-        except json.JSONDecodeError as e:
-            print(f"Error decoding JSON from '{IMPACT_TYPES_FILE}': {e}. Overwriting with default impact types.")
-            save_impact_types(IMPACT_TYPES)
-            return IMPACT_TYPES.copy()
-        except Exception as e:
-            print(f"Unexpected error loading '{IMPACT_TYPES_FILE}': {e}. Using default impact types for this session.")
-            try:
-                save_impact_types(IMPACT_TYPES)
-            except Exception as save_e:
-                print(f"Could not save default impact types to '{IMPACT_TYPES_FILE}' after load error: {save_e}")
-            return IMPACT_TYPES.copy()
-    else:
-        print(f"'{IMPACT_TYPES_FILE}' not found. Creating with default impact types.")
-        save_impact_types(IMPACT_TYPES)
-        return IMPACT_TYPES.copy()
+    """Load impact types with cascade: user copy → bundled copy → defaults."""
+    user_types = _read_json_dict_file(USER_IMPACT_TYPES_FILE)
+    if user_types is not None:
+        return user_types
+
+    bundled_types = _read_json_dict_file(IMPACT_TYPES_FILE)
+    if bundled_types is not None:
+        save_impact_types(bundled_types)
+        return bundled_types
+
+    print(
+        f"No impact types file found at '{USER_IMPACT_TYPES_FILE}' or '{IMPACT_TYPES_FILE}'. "
+        "Seeding from IMPACT_TYPES defaults."
+    )
+    save_impact_types(IMPACT_TYPES)
+    return IMPACT_TYPES.copy()
 
 
 # Initialize categories and impact types - loaded once when module is imported

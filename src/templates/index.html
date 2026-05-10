@@ -183,10 +183,29 @@
                             <div class="fluent-alert fluent-alert-success">
                                 <i class="bi bi-check-circle"></i>
                                 <div>
-                                    <strong>CSV Export</strong> - Always enabled<br>
-                                    All collected feedback is automatically saved to CSV format in the data folder.
+                                    <strong>Local SQLite database</strong> - Always enabled<br>
+                                    Every collection run and every edit (state, notes, domain, category) is
+                                    stored in <code>data/feedback_store.db</code>. Duplicate items (same
+                                    <code>Feedback_ID</code>) are merged automatically: collection runs refresh
+                                    the source content but never overwrite your edits.
                                 </div>
                             </div>
+
+                            <div class="config-field-row mt-3">
+                                <button class="fluent-button fluent-button-primary" id="exportFeedbackBtn" onclick="exportFeedbackCsv()">
+                                    <i class="bi bi-download"></i> Export to CSV (timestamped)
+                                </button>
+                                <button class="fluent-button fluent-button-secondary" id="importFeedbackBtn" onclick="document.getElementById('importFeedbackFile').click()">
+                                    <i class="bi bi-upload"></i> Import from CSV
+                                </button>
+                                <select id="importMode" class="fluent-input" style="max-width: 220px;" title="How to handle duplicate Feedback_IDs">
+                                    <option value="merge" selected>Merge (refresh content, keep edits)</option>
+                                    <option value="skip_existing">Skip existing</option>
+                                    <option value="overwrite">Overwrite (replace state too)</option>
+                                </select>
+                                <input type="file" id="importFeedbackFile" accept=".csv" style="display: none;" onchange="importFeedbackCsv(this)">
+                            </div>
+                            <div id="storageStatus" class="status-message mt-2"></div>
                         </div>
 
                         <!-- Fabric Storage -->
@@ -434,52 +453,12 @@
 
             <!-- Source Progress -->
             <div class="mb-4">
-                <h6 class="text-muted mb-2">Source Progress</h6>
-                <div class="row">
-                    <div class="col-6 mb-2">
-                        <div class="card text-center">
-                            <div class="card-body py-2">
-                                <div class="h6 mb-0" id="redditCount">0</div>
-                                <small class="text-muted">Reddit</small>
-                                <div class="progress mt-1" style="height: 4px;">
-                                    <div class="progress-bar bg-warning" id="redditProgress" style="width: 0%"></div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-6 mb-2">
-                        <div class="card text-center">
-                            <div class="card-body py-2">
-                                <div class="h6 mb-0" id="fabricCount">0</div>
-                                <small class="text-muted">Fabric</small>
-                                <div class="progress mt-1" style="height: 4px;">
-                                    <div class="progress-bar bg-info" id="fabricProgress" style="width: 0%"></div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-6 mb-2">
-                        <div class="card text-center">
-                            <div class="card-body py-2">
-                                <div class="h6 mb-0" id="githubCount">0</div>
-                                <small class="text-muted">GitHub</small>
-                                <div class="progress mt-1" style="height: 4px;">
-                                    <div class="progress-bar bg-success" id="githubProgress" style="width: 0%"></div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-6 mb-2">
-                        <div class="card text-center">
-                            <div class="card-body py-2">
-                                <div class="h6 mb-0" id="adoCount">0</div>
-                                <small class="text-muted">ADO</small>
-                                <div class="progress mt-1" style="height: 4px;">
-                                    <div class="progress-bar bg-primary" id="adoProgress" style="width: 0%"></div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h6 class="text-muted mb-0">Per-Source Status</h6>
+                    <small class="text-muted" id="sourceStatusSummary">--</small>
+                </div>
+                <div id="sourceStatusList" class="d-flex flex-column gap-2">
+                    <div class="text-muted small">No sources yet. Click "Collect Feedback Now" to start.</div>
                 </div>
             </div>
 
@@ -1301,11 +1280,15 @@
             
             document.getElementById('closeCollectionDrawer').disabled = false;
             
-            // Reset source counts and progress
-            ['reddit', 'fabric', 'github', 'ado'].forEach(source => {
-                document.getElementById(`${source}Count`).textContent = '0';
-                document.getElementById(`${source}Progress`).style.width = '0%';
-            });
+            // Reset the per-source status list. The new render is data-driven
+            // (server pushes ``source_states`` over SSE) so we only need to
+            // clear the container; the next tick rebuilds it.
+            const sourceList = document.getElementById('sourceStatusList');
+            if (sourceList) {
+                sourceList.innerHTML = '<div class="text-muted small">Starting collection...</div>';
+            }
+            const sourceSummary = document.getElementById('sourceStatusSummary');
+            if (sourceSummary) sourceSummary.textContent = '--';
             
             // Don't add log until collection starts
         }
@@ -1572,57 +1555,84 @@
             });
         }
 
+        // Self-contained Help dialog. Does not depend on Bootstrap JS so it
+        // always opens AND closes (X button, Close button, ESC key, backdrop
+        // click). Avoids the "stuck help page with no way back" bug.
         function showHelp() {
-            const helpModal = document.createElement('div');
-            helpModal.className = 'modal fade';
-            helpModal.innerHTML = `
-                <div class="modal-dialog modal-lg">
-                    <div class="modal-content">
-                        <div class="modal-header">
-                            <h5 class="modal-title">
-                                <i class="bi bi-question-circle"></i>
-                                Feedback Collector Help
-                            </h5>
-                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                        </div>
-                        <div class="modal-body">
-                            <h6>How to Use</h6>
-                            <ol>
-                                <li><strong>Configure Data Sources:</strong> Enable/disable sources and customize their settings</li>
-                                <li><strong>Adjust Collection Settings:</strong> Set time ranges, limits, and filters</li>
-                                <li><strong>Manage Keywords:</strong> Add or remove keywords to filter relevant feedback</li>
-                                <li><strong>Collect Feedback:</strong> Click the main button to start collection</li>
-                                <li><strong>View Results:</strong> Use the navigation to view collected feedback and insights</li>
-                            </ol>
-                            
-                            <h6>Data Sources</h6>
-                            <ul>
-                                <li><strong>Reddit:</strong> Collects from specified subreddits</li>
-                                <li><strong>GitHub:</strong> Collects from repository discussions and issues</li>
-                                <li><strong>Fabric Community:</strong> Collects from Microsoft Fabric forums</li>
-                                <li><strong>Azure DevOps:</strong> Collects from work items</li>
-                            </ul>
-                            
-                            <h6>Storage Options</h6>
-                            <ul>
-                                <li><strong>CSV Export:</strong> Always enabled - creates local CSV files</li>
-                                <li><strong>Fabric Lakehouse:</strong> Optional - requires authentication</li>
-                            </ul>
-                        </div>
-                        <div class="modal-footer">
-                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-                        </div>
-                    </div>
+            // If a help dialog is already open, do nothing.
+            if (document.getElementById('appHelpOverlay')) return;
+
+            const overlay = document.createElement('div');
+            overlay.id = 'appHelpOverlay';
+            overlay.setAttribute('role', 'dialog');
+            overlay.setAttribute('aria-modal', 'true');
+            overlay.style.cssText = [
+                'position:fixed', 'inset:0', 'z-index:2000',
+                'background:rgba(0,0,0,0.5)',
+                'display:flex', 'align-items:center', 'justify-content:center',
+                'padding:24px'
+            ].join(';');
+
+            const dialog = document.createElement('div');
+            dialog.style.cssText = [
+                'background:#fff', 'color:#1a1a1a', 'border-radius:8px',
+                'max-width:720px', 'width:100%', 'max-height:90vh',
+                'overflow:auto', 'box-shadow:0 10px 40px rgba(0,0,0,0.3)'
+            ].join(';');
+            dialog.innerHTML = `
+                <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid #e5e5e5;">
+                    <h5 style="margin:0;font-size:1.15rem;">
+                        <i class="bi bi-question-circle"></i>
+                        Feedback Collector Help
+                    </h5>
+                    <button type="button" id="appHelpCloseX" aria-label="Close"
+                            style="background:transparent;border:none;font-size:1.5rem;line-height:1;cursor:pointer;color:#666;">&times;</button>
+                </div>
+                <div style="padding:20px;">
+                    <h6>How to Use</h6>
+                    <ol>
+                        <li><strong>Configure Data Sources:</strong> Enable/disable sources and customize their settings</li>
+                        <li><strong>Adjust Collection Settings:</strong> Set time ranges, limits, and filters</li>
+                        <li><strong>Manage Keywords:</strong> Add or remove keywords to filter relevant feedback</li>
+                        <li><strong>Collect Feedback:</strong> Click the main button to start collection</li>
+                        <li><strong>View Results:</strong> Use the navigation to view collected feedback and insights</li>
+                    </ol>
+
+                    <h6>Data Sources</h6>
+                    <ul>
+                        <li><strong>Reddit:</strong> Collects from specified subreddits</li>
+                        <li><strong>GitHub:</strong> Collects from repository discussions and issues</li>
+                        <li><strong>Fabric Community:</strong> Collects from Microsoft Fabric forums</li>
+                        <li><strong>Azure DevOps:</strong> Collects from work items</li>
+                    </ul>
+
+                    <h6>Storage Options</h6>
+                    <ul>
+                        <li><strong>SQLite (default):</strong> Persistent local store at <code>data/feedback_store.db</code> — preserves your edits across runs.</li>
+                        <li><strong>CSV Export / Import:</strong> Use the buttons under "Local Storage" to back up or merge in another snapshot.</li>
+                        <li><strong>Fabric Lakehouse:</strong> Optional bulk write — requires a bearer token.</li>
+                    </ul>
+                </div>
+                <div style="padding:12px 20px;border-top:1px solid #e5e5e5;text-align:right;">
+                    <button type="button" id="appHelpCloseBtn" class="btn btn-secondary">Close</button>
                 </div>
             `;
-            document.body.appendChild(helpModal);
-            const modal = new bootstrap.Modal(helpModal);
-            modal.show();
-            
-            // Remove modal from DOM when closed
-            helpModal.addEventListener('hidden.bs.modal', () => {
-                helpModal.remove();
-            });
+
+            overlay.appendChild(dialog);
+            document.body.appendChild(overlay);
+
+            const close = () => {
+                document.removeEventListener('keydown', onKey);
+                if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+            };
+            const onKey = (e) => { if (e.key === 'Escape') close(); };
+
+            // Close on X, footer button, and backdrop click (but not when
+            // clicking inside the dialog itself).
+            dialog.querySelector('#appHelpCloseX').addEventListener('click', close);
+            dialog.querySelector('#appHelpCloseBtn').addEventListener('click', close);
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+            document.addEventListener('keydown', onKey);
         }
 
         // Resume collection progress if returning to page during collection
@@ -1882,11 +1892,6 @@
                 currentSourceClass: document.getElementById('currentCollectionSource').className,
                 spinnerDisplay: document.getElementById('collectionSpinner').style.display,
                 cancelButtonDisabled: document.getElementById('cancelOperation').disabled,
-                // Save source counts
-                redditCount: document.getElementById('redditCount').textContent,
-                fabricCount: document.getElementById('fabricCount').textContent,
-                githubCount: document.getElementById('githubCount').textContent,
-                adoCount: document.getElementById('adoCount').textContent,
                 // Save logs
                 logs: document.getElementById('collectionLog').innerHTML,
                 timestamp: Date.now()
@@ -1915,12 +1920,6 @@
                         document.getElementById('collectionSpinner').style.display = state.spinnerDisplay || 'none';
                         document.getElementById('cancelOperation').disabled = state.cancelButtonDisabled || false;
                         
-                        // Restore source counts
-                        document.getElementById('redditCount').textContent = state.redditCount || '0';
-                        document.getElementById('fabricCount').textContent = state.fabricCount || '0';
-                        document.getElementById('githubCount').textContent = state.githubCount || '0';
-                        document.getElementById('adoCount').textContent = state.adoCount || '0';
-                        
                         // Restore logs
                         if (state.logs) {
                             document.getElementById('collectionLog').innerHTML = state.logs;
@@ -1938,18 +1937,81 @@
                 }
             }
         }
+
+        // -------------------------------------------------------------
+        // Local store: CSV export / import
+        // -------------------------------------------------------------
+        function showStorageStatus(message, isError = false) {
+            const el = document.getElementById('storageStatus');
+            if (!el) return;
+            el.className = 'status-message mt-2 ' + (isError ? 'text-danger' : 'text-success');
+            el.textContent = message;
+        }
+
+        async function exportFeedbackCsv() {
+            const btn = document.getElementById('exportFeedbackBtn');
+            if (btn) { btn.disabled = true; btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Exporting...'; }
+            try {
+                // Trigger a normal download. The endpoint sets Content-Disposition.
+                window.location.href = '/api/feedback/export?download=true';
+                showStorageStatus('Export started. Your browser will download a timestamped CSV.');
+            } catch (e) {
+                showStorageStatus('Export failed: ' + e, true);
+            } finally {
+                setTimeout(() => {
+                    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="bi bi-download"></i> Export to CSV (timestamped)'; }
+                }, 1500);
+            }
+        }
+
+        async function importFeedbackCsv(input) {
+            if (!input || !input.files || !input.files.length) return;
+            const file = input.files[0];
+            const mode = (document.getElementById('importMode') || {}).value || 'merge';
+
+            const fd = new FormData();
+            fd.append('file', file);
+            fd.append('mode', mode);
+
+            const btn = document.getElementById('importFeedbackBtn');
+            if (btn) { btn.disabled = true; btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Importing...'; }
+            showStorageStatus('Uploading ' + file.name + '...');
+
+            try {
+                const resp = await fetch('/api/feedback/import', { method: 'POST', body: fd });
+                const data = await resp.json();
+                if (!resp.ok || data.status !== 'success') {
+                    throw new Error(data.message || ('HTTP ' + resp.status));
+                }
+                const s = data.summary || {};
+                showStorageStatus(
+                    'Import complete (' + mode + '): ' +
+                    (s.new || 0) + ' new, ' +
+                    (s.updated || 0) + ' updated, ' +
+                    (s.skipped || 0) + ' skipped. Total in store: ' + (data.total_items || 0)
+                );
+            } catch (e) {
+                showStorageStatus('Import failed: ' + e.message, true);
+            } finally {
+                input.value = '';
+                if (btn) { btn.disabled = false; btn.innerHTML = '<i class="bi bi-upload"></i> Import from CSV'; }
+            }
+        }
     </script>
 
-    <!-- Bootstrap JS -->
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    
     <!-- Initialize application -->
     <script>
         // Source configuration is already initialized in source-configuration.js
-        // No additional initialization needed here
+        // Bootstrap JS is loaded earlier in this template (single inclusion).
     </script>
 
     <style>
+        /* Per-source running spinner used in the collection drawer */
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to   { transform: rotate(360deg); }
+        }
+
         /* Category Tree Styles */
         .category-tree {
             border: 1px solid #ddd;

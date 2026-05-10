@@ -54,6 +54,7 @@ class EnhancedCollectionManager {
         }
         
         this.isCollecting = true;
+        this._completionHandled = false;
         this.collectionStatus = {
             status: 'running',
             progress: 0,
@@ -108,7 +109,9 @@ class EnhancedCollectionManager {
                 console.log('✅ Post-SSE reset completed to override any stale server data');
             }, 200);
             
-            // Send collection request
+            // Send collection request. The server now runs the scrape on a
+            // background thread and returns 202 immediately - progress and
+            // the final result arrive over the SSE stream.
             const response = await fetch('/api/collect', {
                 method: 'POST',
                 headers: {
@@ -116,12 +119,31 @@ class EnhancedCollectionManager {
                 },
                 body: JSON.stringify(config)
             });
-            
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
+
+            // 202 Accepted = collection running on the server; we wait for SSE.
+            if (response.status === 202) {
+                console.log('Collection accepted, awaiting SSE completion');
+                return;
             }
-            
+
+            // Anything else with an OK code we treat as a synchronous result
+            // (kept for backwards compatibility).
+            if (!response.ok) {
+                let serverMsg = `HTTP ${response.status}`;
+                try {
+                    const errorBody = await response.json();
+                    serverMsg = errorBody.error || errorBody.message || serverMsg;
+                } catch (_) {
+                    // Body was not JSON; fall back to status code.
+                }
+                throw new Error(serverMsg);
+            }
+
             const result = await response.json();
+            if (result && result.status === 'started') {
+                // Background mode; SSE will deliver completion.
+                return;
+            }
             this.handleCollectionComplete(result);
             
         } catch (error) {
@@ -203,7 +225,21 @@ class EnhancedCollectionManager {
             this.collectionStatus.current_source = 'Completed';
             console.log(`[COMPLETION] Updated collectionStatus:`, this.collectionStatus);
             this.updateProgressUI();
-            
+
+            // Now that /api/collect returns 202 immediately, completion has
+            // to be wired up here. The server includes the per-source
+            // results dict in collection_status when it transitions to
+            // completed (see _collect_feedback_body in app.py).
+            if (!this._completionHandled) {
+                this._completionHandled = true;
+                const result = data.results || this._buildResultFromCounts(data);
+                try {
+                    this.handleCollectionComplete(result);
+                } catch (e) {
+                    console.error('handleCollectionComplete failed:', e);
+                }
+            }
+
             // Close event source after a short delay to ensure final update is processed
             setTimeout(() => {
                 if (this.eventSource) {
@@ -215,7 +251,12 @@ class EnhancedCollectionManager {
             this.collectionStatus.progress = 0;
             this.collectionStatus.message = data.error_message || 'Collection failed';
             this.updateProgressUI();
-            
+
+            if (!this._completionHandled) {
+                this._completionHandled = true;
+                this.handleCollectionError(new Error(data.error_message || 'Collection failed'));
+            }
+
             // Close event source on error
             if (this.eventSource) {
                 this.eventSource.close();
@@ -223,7 +264,23 @@ class EnhancedCollectionManager {
             }
         }
     }
-    
+
+    /**
+     * Build a {source: {count, completed}} dict from a flat
+     * source_counts object delivered over SSE. Used when the SSE
+     * snapshot does not carry the original ``results`` map (older
+     * server builds, or before the completion event arrives with the
+     * full payload).
+     */
+    _buildResultFromCounts(data) {
+        const counts = (data && data.source_counts) || {};
+        const result = { total: data && data.total_items ? data.total_items : 0 };
+        Object.entries(counts).forEach(([source, count]) => {
+            result[source] = { count: Number(count) || 0, completed: true };
+        });
+        return result;
+    }
+
     handleCollectionComplete(result) {
         this.isCollecting = false;
         
@@ -263,13 +320,6 @@ class EnhancedCollectionManager {
         
         // Force update the progress UI to reflect final counts
         this.updateProgressUI();
-        
-        // LEGACY FIX: Direct DOM update for fabricCount as additional safety
-        const fabricCountElement = document.getElementById('fabricCount');
-        if (fabricCountElement && result.fabricCommunity) {
-            fabricCountElement.textContent = result.fabricCommunity.count || 0;
-            console.log(`[FABRIC FIX] Updated fabricCount DOM directly to: ${result.fabricCommunity.count}`);
-        }
         
         this.updateUI();
         this.showCollectionResults(result);
@@ -370,203 +420,144 @@ class EnhancedCollectionManager {
         }
         
         // Update source-specific progress
-        this.updateSourceProgress();
+        this.renderSourceStatusList();
+    }
+
+    /**
+     * Render the per-source status list inside #sourceStatusList.
+     * Driven entirely by ``collection_status.source_states`` (a dict of
+     * {key: {label, state, count, message}}). States: pending / running /
+     * success / error / skipped.
+     */
+    renderSourceStatusList() {
+        const container = document.getElementById('sourceStatusList');
+        if (!container) return;
+
+        const states = this.collectionStatus.source_states || {};
+        const keys = Object.keys(states);
+
+        // Empty state placeholder.
+        if (keys.length === 0) {
+            container.innerHTML = '<div class="text-muted small">No sources yet. Click "Collect Feedback Now" to start.</div>';
+            const summary = document.getElementById('sourceStatusSummary');
+            if (summary) summary.textContent = '--';
+            return;
+        }
+
+        // Stable order: keep the order the server first sends them in.
+        if (!this._sourceOrder) this._sourceOrder = [];
+        keys.forEach(k => { if (!this._sourceOrder.includes(k)) this._sourceOrder.push(k); });
+
+        const rowFor = (key) => {
+            const entry = states[key] || {};
+            const label = entry.label || key;
+            const state = entry.state || 'pending';
+            const count = entry.count;
+            const message = entry.message || '';
+
+            const stateMap = {
+                pending:  { icon: 'bi-hourglass',         cls: 'text-muted',    badge: 'bg-secondary',  text: 'Pending' },
+                running:  { icon: 'bi-arrow-repeat',      cls: 'text-primary',  badge: 'bg-primary',    text: 'Running' },
+                success:  { icon: 'bi-check-circle-fill', cls: 'text-success',  badge: 'bg-success',    text: 'Success' },
+                error:    { icon: 'bi-x-circle-fill',     cls: 'text-danger',   badge: 'bg-danger',     text: 'Error' },
+                skipped:  { icon: 'bi-slash-circle',      cls: 'text-warning',  badge: 'bg-warning text-dark', text: 'Skipped' },
+            };
+            const meta = stateMap[state] || stateMap.pending;
+            const spinning = state === 'running' ? ' style="animation: spin 1s linear infinite;"' : '';
+
+            const countBadge = (count !== undefined && count !== null && state !== 'pending')
+                ? `<span class="badge bg-light text-dark border ms-2">${count} items</span>`
+                : '';
+
+            return `
+                <div class="border rounded p-2 d-flex align-items-start gap-2" data-source-key="${this._escape(key)}">
+                    <i class="bi ${meta.icon} ${meta.cls}" style="font-size:1.1rem;${spinning ? ' animation: spin 1s linear infinite;' : ''}"></i>
+                    <div class="flex-grow-1" style="min-width:0;">
+                        <div class="d-flex align-items-center justify-content-between">
+                            <strong class="text-truncate">${this._escape(label)}</strong>
+                            <span class="badge ${meta.badge}">${meta.text}</span>
+                        </div>
+                        <div class="small text-muted text-truncate">
+                            ${this._escape(message) || '&nbsp;'}
+                            ${countBadge}
+                        </div>
+                    </div>
+                </div>
+            `;
+        };
+
+        container.innerHTML = this._sourceOrder
+            .filter(k => states[k])
+            .map(rowFor)
+            .join('');
+
+        // Summary line: "2/5 done · 1 running"
+        let done = 0, running = 0, pending = 0, errored = 0, skipped = 0;
+        Object.values(states).forEach(s => {
+            switch (s.state) {
+                case 'success': done++; break;
+                case 'running': running++; break;
+                case 'pending': pending++; break;
+                case 'error':   errored++; break;
+                case 'skipped': skipped++; break;
+            }
+        });
+        const total = Object.keys(states).length;
+        const summary = document.getElementById('sourceStatusSummary');
+        if (summary) {
+            const parts = [`${done}/${total} done`];
+            if (running) parts.push(`${running} running`);
+            if (pending) parts.push(`${pending} pending`);
+            if (errored) parts.push(`${errored} error`);
+            if (skipped) parts.push(`${skipped} skipped`);
+            summary.textContent = parts.join(' · ');
+        }
+    }
+
+    _escape(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
     }
     
     resetProgressDisplays() {
         console.log('[RESET] Starting resetProgressDisplays()');
-        
-        // Reset all source counts to 0 when starting a new collection
-        const countElements = {
-            'reddit': 'redditCount',
-            'github': 'githubCount',
-            'fabricCommunity': 'fabricCount',
-            'fabric': 'fabricCount',
-            'ado': 'adoCount'
-        };
-        
-        const progressElements = {
-            'reddit': 'redditProgress',
-            'github': 'githubProgress',
-            'fabricCommunity': 'fabricProgress',
-            'fabric': 'fabricProgress',
-            'ado': 'adoProgress'
-        };
-        
-        // Reset counts
-        Object.entries(countElements).forEach(([source, elementId]) => {
-            const element = document.getElementById(elementId);
-            if (element) {
-                const oldValue = element.textContent;
-                element.textContent = '0';
-                console.log(`[RESET] ${source}Count: ${oldValue} → 0`);
-            } else {
-                console.log(`[RESET] ${elementId} element not found`);
-            }
-        });
-        
-        // Reset progress bars
-        Object.entries(progressElements).forEach(([source, elementId]) => {
-            const element = document.getElementById(elementId);
-            if (element) {
-                const oldWidth = element.style.width;
-                element.style.width = '0%';
-                console.log(`[RESET] ${source}Progress: ${oldWidth} → 0%`);
-            } else {
-                console.log(`[RESET] ${elementId} element not found`);
-            }
-        });
-        
-        // Reset overall progress
+
+        // Reset overall progress bar / percentage / current-source text.
         const progressBar = document.getElementById('collectionProgressBar');
         const progressPercentage = document.getElementById('collectionProgressPercentage');
         const currentSource = document.getElementById('collectionSourceText');
         const progressStatus = document.getElementById('collectionProgressStatus');
-        
-        if (progressBar) {
-            progressBar.style.width = '0%';
-            console.log(`[RESET] collectionProgressBar: → 0%`);
+
+        if (progressBar) progressBar.style.width = '0%';
+        if (progressPercentage) progressPercentage.textContent = '0%';
+        if (currentSource) currentSource.textContent = 'Initializing...';
+        if (progressStatus) progressStatus.textContent = 'Starting collection...';
+
+        // Force a reflow on the progress bar so the width change is visible.
+        if (progressBar) progressBar.offsetHeight;
+
+        // Clear the per-source status list. The server will repopulate it
+        // via SSE as soon as the new collection seeds source_states.
+        this._sourceOrder = [];
+        const list = document.getElementById('sourceStatusList');
+        if (list) {
+            list.innerHTML = '<div class="text-muted small">Starting collection...</div>';
         }
-        if (progressPercentage) {
-            progressPercentage.textContent = '0%';
-            console.log(`[RESET] collectionProgressPercentage: → 0%`);
-        }
-        if (currentSource) {
-            currentSource.textContent = 'Initializing...';
-            console.log(`[RESET] collectionSourceText: → Initializing...`);
-        }
-        if (progressStatus) {
-            progressStatus.textContent = 'Starting collection...';
-            console.log(`[RESET] collectionProgressStatus: → Starting collection...`);
-        }
-        
-        // Force a DOM update by triggering a reflow
-        if (progressBar) {
-            progressBar.offsetHeight; // Force reflow
-        }
-        
-        console.log('✅ Reset all progress displays to 0 - DOM reflow forced');
+        const summary = document.getElementById('sourceStatusSummary');
+        if (summary) summary.textContent = '--';
+
+        console.log('✅ Reset all progress displays');
     }
     
     updateSourceProgress() {
-        console.log(`[DEBUG] updateSourceProgress called, source_counts:`, this.collectionStatus.source_counts);
-        
-        const sourceMap = {
-            'reddit': 'redditProgress',
-            'github': 'githubProgress',
-            'fabricCommunity': 'fabricProgress',
-            'fabric': 'fabricProgress',  // Handle both naming conventions
-            'ado': 'adoProgress'
-        };
-        
-        const countMap = {
-            'reddit': 'redditCount',
-            'github': 'githubCount',
-            'fabricCommunity': 'fabricCount',
-            'fabric': 'fabricCount',  // Handle both naming conventions
-            'ado': 'adoCount'
-        };
-        
-        // If collection is completed, set all progress bars to 100%
-        if (this.collectionStatus.status === 'completed' || this.collectionStatus.current_source === 'Completed') {
-            console.log(`[COMPLETION] Setting all progress bars to 100% on completion`);
-            
-            Object.entries(sourceMap).forEach(([source, elementId]) => {
-                const element = document.getElementById(elementId);
-                const countElement = document.getElementById(countMap[source]);
-                
-                if (element) {
-                    element.style.width = '100%';
-                    console.log(`[COMPLETION] Set ${source} progress to 100%`);
-                }
-                
-                if (countElement && this.collectionStatus.source_counts && this.collectionStatus.source_counts[source] !== undefined) {
-                    countElement.textContent = this.collectionStatus.source_counts[source];
-                    console.log(`[COMPLETION] Set ${source} count to: ${this.collectionStatus.source_counts[source]}`);
-                }
-            });
-            
-            return; // Exit early since we've handled completion
-        }
-        
-        // Special handling for fabricCommunity to ensure it updates
-        if (this.collectionStatus.source_counts && this.collectionStatus.source_counts.fabricCommunity !== undefined) {
-            const fabricElement = document.getElementById('fabricCount');
-            if (fabricElement) {
-                fabricElement.textContent = this.collectionStatus.source_counts.fabricCommunity;
-                console.log(`[FABRIC FIX] Direct update fabricCount to: ${this.collectionStatus.source_counts.fabricCommunity}`);
-            }
-        }
-        
-        // Update all sources
-        Object.entries(sourceMap).forEach(([source, elementId]) => {
-            const element = document.getElementById(elementId);
-            const countElement = document.getElementById(countMap[source]);
-            
-            if (element) {
-                let progress = 0;
-                let count = 0;
-                
-                // Check if this source has counts from server-sent events
-                if (this.collectionStatus.source_counts && this.collectionStatus.source_counts[source] !== undefined) {
-                    count = this.collectionStatus.source_counts[source];
-                    progress = 100; // If we have a count, the source is complete
-                    
-                    if (source === 'fabricCommunity' || source === 'fabric') {
-                        console.log(`[DEBUG] ${source} - Found in source_counts: ${count}`);
-                    }
-                }
-                // Check if this source is in the results (fallback)
-                else if (this.collectionStatus.results && this.collectionStatus.results[source]) {
-                    const result = this.collectionStatus.results[source];
-                    progress = result.completed ? 100 : (result.progress || 0);
-                    count = result.count || 0;
-                    
-                    if (source === 'fabricCommunity' || source === 'fabric') {
-                        console.log(`[DEBUG] ${source} - Found in results: ${count}`);
-                    }
-                }
-                
-                // Check if this source is in the completed sources
-                if (this.collectionStatus.sources_completed && 
-                    this.collectionStatus.sources_completed.includes(this.getSourceDisplayName(source))) {
-                    progress = 100;
-                }
-                
-                // Update progress bar
-                element.style.width = `${progress}%`;
-                
-                // Update count element
-                if (countElement) {
-                    const oldValue = countElement.textContent;
-                    countElement.textContent = count;
-                    
-                    if (source === 'fabricCommunity' || source === 'fabric') {
-                        console.log(`[DEBUG] ${source} - Updated DOM: ${oldValue} → ${count} (element: ${countMap[source]})`);
-                    }
-                } else {
-                    // Log missing count elements for debugging
-                    console.warn(`Count element ${countMap[source]} not found for source: ${source}`);
-                }
-            } else {
-                // Log missing progress elements for debugging
-                console.warn(`Progress element ${elementId} not found for source: ${source}`);
-            }
-        });
-        
-        // Additional safety check: Force update fabricCount if it exists in source_counts
-        if (this.collectionStatus.source_counts && this.collectionStatus.source_counts.fabricCommunity !== undefined) {
-            const fabricCountElement = document.getElementById('fabricCount');
-            if (fabricCountElement) {
-                const expectedValue = this.collectionStatus.source_counts.fabricCommunity;
-                const currentValue = fabricCountElement.textContent;
-                
-                if (currentValue !== expectedValue.toString()) {
-                    fabricCountElement.textContent = expectedValue;
-                    console.log(`[FABRIC FORCE UPDATE] fabricCount was ${currentValue}, forced to ${expectedValue}`);
-                }
-            }
-        }
+        // Legacy method retained for backward compatibility. The new
+        // per-source rendering happens in renderSourceStatusList(),
+        // which is called from updateProgressUI(). This is now a no-op
+        // so older call-sites don't break.
+        this.renderSourceStatusList();
     }
     
     updateSourceInfo(results) {

@@ -27,7 +27,7 @@ def available_hiddenimports(*modules):
 
 a = Analysis(
     ['start_feedback_collector.py'],
-    pathex=[],
+    pathex=[str(src_dir)],
     binaries=[],
     datas=datas,
     hiddenimports=available_hiddenimports(
@@ -38,7 +38,21 @@ a = Analysis(
         'flask',
         'jinja2',
         'dotenv',
-    ),
+    ) + [
+        # Modules under src/ that are loaded indirectly by the
+        # Flask routes (so PyInstaller's static analyser doesn't
+        # always pick them up). pathex above lets it resolve them.
+        'run_web',
+        'app',
+        'config',
+        'collectors',
+        'utils',
+        'state_manager',
+        'id_generator',
+        'ado_client',
+        'local_store',
+        'runtime_paths',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

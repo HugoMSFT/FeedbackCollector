@@ -5,6 +5,7 @@ import logging
 import time
 import threading
 import tempfile
+import secrets
 from datetime import datetime
 from typing import Dict, Any, Optional
 import json
@@ -25,7 +26,7 @@ app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB max request size
 _secret_key = os.getenv("FLASK_SECRET_KEY")
 if not _secret_key:
     logger.warning("FLASK_SECRET_KEY not set – using insecure dev key. Set it in production!")
-    _secret_key = "dev-key-change-in-production"
+    _secret_key = secrets.token_hex(32)
 app.secret_key = _secret_key
 
 # Lock protecting mutable global state that is read/written by concurrent requests
@@ -1545,8 +1546,7 @@ def feedback_viewer():
 
     # Handle repeating feedback
     if not show_repeating:
-        # This logic needs to be robust
-        pass
+        feedback_to_display = utils.collapse_repeating_feedback_items(feedback_to_display)
 
     # Sorting
     if sort_by == "newest":
@@ -2360,6 +2360,9 @@ def apply_filters_to_feedback(
         filtered_feedback = [item for item in filtered_feedback if item.get("Impacttype") in impacttype_filters]
 
     # Apply sorting
+    if not show_repeating:
+        filtered_feedback = utils.collapse_repeating_feedback_items(filtered_feedback)
+
     if sort_by == "newest":
         # Debug: check some Created values before sorting
         sample_dates = [item.get("Created", "") for item in filtered_feedback[:3]]
@@ -2783,7 +2786,7 @@ def sync_states_to_fabric():
             if new_state and not state_manager.validate_state(new_state):
                 return jsonify({"status": "error", "message": f"Invalid state: {new_state}"}), 400
         logger.info(f"🔥 FABRIC SQL SYNC: Writing {len(state_changes)} state changes to Fabric SQL Database")
-        print(f"🔥 FABRIC SQL SYNC: Processing {len(state_changes)} state changes")
+        logger.info("🔥 FABRIC SQL SYNC: Processing %s state changes", len(state_changes))
 
         # Update in Fabric SQL database using state_manager (no bearer token needed)
         success = state_manager.update_feedback_states_in_fabric_sql(auth_header.replace("Bearer ", ""), state_changes)
@@ -2793,7 +2796,7 @@ def sync_states_to_fabric():
             return jsonify({"status": "error", "message": "Failed to write state changes to Fabric SQL Database"}), 500
 
         logger.warning("✅ FABRIC SQL SYNC SUCCESS: All state changes written to Fabric SQL Database")
-        print("✅ FABRIC SQL SYNC COMPLETED SUCCESSFULLY")
+        logger.info("✅ FABRIC SQL SYNC COMPLETED SUCCESSFULLY")
 
         # Update in-memory data after successful Fabric write
         global last_collected_feedback

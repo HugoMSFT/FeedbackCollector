@@ -1176,7 +1176,7 @@ def analyze_repeating_requests(feedback_items: list) -> dict:
         similar_items = find_similar_feedback(item_text, feedback_items, similarity_threshold=0.4, exclude_self=False)
 
         # Filter out the current item from similar items to avoid self-inclusion
-        similar_items = [si for si in similar_items if si["feedback_item"] != item]
+        similar_items = [si for si in similar_items if si["feedback_item"] is not item]
 
         # Only create a cluster if there are actually similar items (i.e., repetitions)
         if similar_items:
@@ -1198,7 +1198,7 @@ def analyze_repeating_requests(feedback_items: list) -> dict:
 
             for similar in similar_items:
                 for j, check_item in enumerate(feedback_items):
-                    if check_item == similar["feedback_item"] and j not in processed:
+                    if check_item is similar["feedback_item"] and j not in processed:
                         processed.add(j)
                         total_clustered_items += 1  # Count each similar item
                         break
@@ -1255,3 +1255,30 @@ def analyze_repeating_requests(feedback_items: list) -> dict:
     )
 
     return analysis
+
+
+def collapse_repeating_feedback_items(feedback_items: list) -> list:
+    """Keep one representative item per repeating cluster and preserve unique items."""
+    if not feedback_items:
+        return []
+
+    analysis = analyze_repeating_requests(feedback_items)
+    repeating_clusters = analysis.get("repeating_clusters", [])
+    if not repeating_clusters:
+        return list(feedback_items)
+
+    primary_ids = set()
+    repeated_ids = set()
+
+    for cluster in repeating_clusters:
+        primary_item = cluster.get("primary_item")
+        if primary_item is not None:
+            primary_ids.add(id(primary_item))
+            repeated_ids.add(id(primary_item))
+
+        for similar_item in cluster.get("similar_items", []):
+            feedback_item = similar_item.get("feedback_item")
+            if feedback_item is not None:
+                repeated_ids.add(id(feedback_item))
+
+    return [item for item in feedback_items if id(item) not in repeated_ids or id(item) in primary_ids]

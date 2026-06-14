@@ -697,6 +697,54 @@
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
+
+        /* Feedback dismiss (X) button on each card */
+        .fluent-card {
+            position: relative;
+        }
+        .feedback-dismiss-btn {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            width: 26px;
+            height: 26px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border: none;
+            border-radius: 50%;
+            background: transparent;
+            color: #605e5c;
+            font-size: 16px;
+            line-height: 1;
+            cursor: pointer;
+            opacity: 0;
+            transition: opacity 0.15s ease, background-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
+            z-index: 5;
+            padding: 0;
+        }
+        .fluent-card:hover .feedback-dismiss-btn,
+        .feedback-dismiss-btn:focus-visible {
+            opacity: 1;
+        }
+        .feedback-dismiss-btn:hover {
+            background-color: #fde7e9;
+            color: #a4262c;
+        }
+        .feedback-dismiss-btn:active {
+            transform: scale(0.92);
+        }
+        /* Reserve space so the X never overlaps long titles */
+        .fluent-card .fluent-card-header .fluent-card-title-truncate {
+            padding-right: 28px;
+        }
+        /* Smooth removal animation */
+        .feedback-dismissing {
+            transition: opacity 0.25s ease, transform 0.25s ease;
+            opacity: 0;
+            transform: scale(0.96);
+            pointer-events: none;
+        }
     </style>
     
     <!-- Badge State Manager -->
@@ -1248,7 +1296,14 @@
             <div id="feedback-grid" class="row row-cols-1 row-cols-md-2 row-cols-lg-3 row-cols-xl-4 row-cols-xxl-5 g-4"> {# Bootstrap grid for cards #}
                 {% for item in feedback_items %}
                 <div class="col">
-                    <div class="fluent-card h-100 d-flex flex-column">
+                    <div class="fluent-card h-100 d-flex flex-column" id="card-{{ item.Feedback_ID or '' }}">
+                        <button type="button"
+                                class="feedback-dismiss-btn"
+                                aria-label="Dismiss this feedback"
+                                title="Dismiss this feedback"
+                                onclick="dismissFeedbackCard('{{ item.Feedback_ID or '' }}', this, event)">
+                            &times;
+                        </button>
                         <div class="fluent-card-header border-bottom-0 pb-0 pt-3 px-3">
                             <h5 class="fluent-section-title mb-1 fluent-card-title-truncate" style="font-size: 1.1rem; line-height: 1.4;" title="{{ item['Feedback_Gist'] or item.Title or ('Feedback from ' + (item.Sources or 'N/A')) }}">
                                 {% if item['Feedback_Gist'] and item['Feedback_Gist']|trim != '' and item['Feedback_Gist']|lower != 'no content' and item['Feedback_Gist']|lower != 'summary unavailable' %}
@@ -2936,6 +2991,108 @@
         }
         
         // Toggle actions menu
+        // ============================================================
+        // Dismiss / close a feedback card ("X" button)
+        // ------------------------------------------------------------
+        // Removes the card from view and remembers the dismissal in
+        // localStorage so it stays hidden across reloads. If Fabric is
+        // connected, it also persists the state as IRRELEVANT (best
+        // effort — UI dismissal still works offline).
+        // ============================================================
+        const DISMISSED_FEEDBACK_STORAGE_KEY = 'dismissedFeedbackIds';
+
+        function getDismissedFeedbackIds() {
+            try {
+                const raw = localStorage.getItem(DISMISSED_FEEDBACK_STORAGE_KEY);
+                if (!raw) return new Set();
+                const arr = JSON.parse(raw);
+                return new Set(Array.isArray(arr) ? arr : []);
+            } catch (e) {
+                console.warn('Could not read dismissed feedback list:', e);
+                return new Set();
+            }
+        }
+
+        function saveDismissedFeedbackIds(set) {
+            try {
+                localStorage.setItem(DISMISSED_FEEDBACK_STORAGE_KEY, JSON.stringify(Array.from(set)));
+            } catch (e) {
+                console.warn('Could not persist dismissed feedback list:', e);
+            }
+        }
+
+        function hideDismissedFeedbackCards() {
+            const dismissed = getDismissedFeedbackIds();
+            if (dismissed.size === 0) return;
+            dismissed.forEach(id => {
+                const card = document.getElementById(`card-${id}`);
+                if (card) {
+                    const col = card.closest('.col') || card.parentElement;
+                    if (col) col.style.display = 'none';
+                }
+            });
+        }
+
+        function dismissFeedbackCard(feedbackId, btn, event) {
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+            if (!feedbackId) {
+                console.warn('dismissFeedbackCard called without a feedback_id');
+                return;
+            }
+
+            const confirmMsg = 'Dismiss this feedback?\n\nIt will be hidden from the view. If you are connected to Fabric, it will also be marked as IRRELEVANT.';
+            if (!confirm(confirmMsg)) return;
+
+            const card = document.getElementById(`card-${feedbackId}`);
+            const col = card ? (card.closest('.col') || card.parentElement) : null;
+
+            // Animate out, then remove
+            if (card) {
+                card.classList.add('feedback-dismissing');
+            }
+            setTimeout(() => {
+                if (col && col.parentElement) {
+                    col.parentElement.removeChild(col);
+                } else if (card && card.parentElement) {
+                    card.parentElement.removeChild(card);
+                }
+            }, 250);
+
+            // Persist locally so it stays dismissed across reloads
+            const dismissed = getDismissedFeedbackIds();
+            dismissed.add(feedbackId);
+            saveDismissedFeedbackIds(dismissed);
+
+            // Best-effort: also mark as IRRELEVANT in Fabric if connected
+            if (typeof stateManagementEnabled !== 'undefined' && typeof fabricConnected !== 'undefined'
+                && stateManagementEnabled && fabricConnected) {
+                fetch('/api/feedback/state/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ feedback_id: feedbackId, state: 'IRRELEVANT' })
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        console.log(`✅ Marked ${feedbackId} as IRRELEVANT in Fabric`);
+                    } else {
+                        console.warn(`⚠️ Could not persist IRRELEVANT state for ${feedbackId}:`, data.message);
+                    }
+                })
+                .catch(err => console.warn(`⚠️ Error persisting IRRELEVANT state for ${feedbackId}:`, err));
+            }
+        }
+
+        // Expose for inline onclick handlers used by both Jinja- and JS-rendered cards
+        window.dismissFeedbackCard = dismissFeedbackCard;
+        window.hideDismissedFeedbackCards = hideDismissedFeedbackCards;
+
+        // Hide already-dismissed cards on initial load
+        document.addEventListener('DOMContentLoaded', hideDismissedFeedbackCards);
+
         // Update feedback state (cached)
         function updateState(feedbackId, newState, stateElement) {
             if (!stateManagementEnabled || !fabricConnected) {

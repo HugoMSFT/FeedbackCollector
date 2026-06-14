@@ -526,6 +526,11 @@ class ModernFilterSystem {
         
         // Reapply state management to new cards
         this.reapplyStateManagement();
+
+        // Hide cards the user has previously dismissed (X button)
+        if (typeof window.hideDismissedFeedbackCards === 'function') {
+            window.hideDismissedFeedbackCards();
+        }
     }
     
     generateFeedbackCardHtml(item, fabricStateData = {}) {
@@ -561,6 +566,13 @@ class ModernFilterSystem {
         return `
             <div class="col">
                 <div class="fluent-card h-100 d-flex flex-column" id="card-${feedbackId}">
+                    <button type="button"
+                            class="feedback-dismiss-btn"
+                            aria-label="Dismiss this feedback"
+                            title="Dismiss this feedback"
+                            onclick="dismissFeedbackCard('${feedbackId}', this, event)">
+                        &times;
+                    </button>
                     <div class="fluent-card-header border-bottom-0 pb-0 pt-3 px-3">
                         <h5 class="fluent-section-title mb-1 fluent-card-title-truncate" style="font-size: 1.1rem; line-height: 1.4;" title="${this.escapeHtml(cardTitle)}">
                             ${this.escapeHtml(cardTitle)}

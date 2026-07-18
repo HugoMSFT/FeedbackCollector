@@ -22,6 +22,16 @@ def main():
     host = os.getenv("FLASK_HOST", "127.0.0.1")
     port = int(os.getenv("FLASK_PORT", os.getenv("PORT", "5000")))
     debug = _get_bool_env("FLASK_DEBUG", False)
+    allow_remote = _get_bool_env("ALLOW_REMOTE_ACCESS", False)
+
+    if host not in {"127.0.0.1", "localhost", "::1"} and not allow_remote:
+        raise RuntimeError(
+            "Refusing to bind FeedbackCollector to a non-loopback address. "
+            "Set ALLOW_REMOTE_ACCESS=1 and APP_API_TOKEN to enable authenticated "
+            "remote access."
+        )
+    if allow_remote and debug:
+        raise RuntimeError("FLASK_DEBUG must be disabled when remote access is enabled.")
 
     access_host = "localhost" if host in {"0.0.0.0", "127.0.0.1"} else host
     access_url = f"http://{access_host}:{port}"

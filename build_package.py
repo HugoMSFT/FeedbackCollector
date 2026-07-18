@@ -1,5 +1,3 @@
-import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -20,11 +18,6 @@ def main():
     ]
 
     subprocess.run(command, cwd=PROJECT_ROOT, check=True)
-
-    for env_candidate in [PROJECT_ROOT / '.env', PROJECT_ROOT / 'src' / '.env']:
-        if env_candidate.exists() and DIST_DIR.exists():
-            shutil.copy2(env_candidate, DIST_DIR / '.env')
-            break
 
     print(f'Build complete: {DIST_DIR}')
 

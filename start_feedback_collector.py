@@ -11,8 +11,10 @@ for _stream_name in ("stdout", "stderr"):
     if _stream is not None and hasattr(_stream, "reconfigure"):
         try:
             _stream.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except (AttributeError, OSError, ValueError) as exc:
+            sys.__stderr__.write(
+                f"Could not configure {_stream_name} for UTF-8: {exc}\n"
+            )
 
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))

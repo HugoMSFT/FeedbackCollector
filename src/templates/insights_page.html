@@ -46,6 +46,7 @@
     </style>
     
     <!-- Badge State Manager -->
+    <script src="{{ url_for('static', filename='js/safe-dom.js') }}"></script>
     <script src="{{ url_for('static', filename='js/badge-state-manager.js') }}"></script>
 </head>
 <body>
@@ -58,18 +59,31 @@
                     <i class="bi bi-activity me-1"></i>Collection Progress
                     <span class="badge bg-secondary ms-1" id="progressBadge">Ready</span>
                 </button>
+                <button class="btn btn-outline-primary ms-2" id="fabricAuthButton" onclick="toggleFabricAuth()">
+                    <i class="bi bi-shield-check me-1"></i>Fabric
+                    <span class="badge bg-secondary ms-1" id="fabricAuthBadge">Not Connected</span>
+                </button>
+                <button class="btn btn-primary ms-2" id="autoWriteFabric" onclick="writeToFabricAuto()" disabled>
+                    <span class="spinner-border spinner-border-sm me-1" id="writeSpinner" role="status" aria-hidden="true" style="display: none;"></span>
+                    <span id="writeButtonLabel">Write to Fabric</span>
+                </button>
             </div>
         </div>
         <hr>
         
         <!-- Power BI Report Container - Now prominently displayed first -->
         <div class="powerbi-container" id="powerbiContainer">
+            {% set safe_powerbi_url = powerbi_embed_base_url|safe_external_url %}
+            {% if safe_powerbi_url %}
             <iframe
                 id="powerbiReport"
                 title="Feedback insights"
-                src="{{ powerbi_embed_base_url }}?reportId={{ powerbi_report_id }}&autoAuth=true&ctid={{ powerbi_tenant_id }}"
+                src="{{ safe_powerbi_url }}?reportId={{ powerbi_report_id|urlencode }}&autoAuth=true&ctid={{ powerbi_tenant_id|urlencode }}"
                 allowFullScreen="true">
             </iframe>
+            {% else %}
+            <div class="alert alert-warning m-3">Power BI embed URL is not configured.</div>
+            {% endif %}
         </div>
     </div>
 
@@ -77,7 +91,7 @@
     <div class="offcanvas offcanvas-end" tabindex="-1" id="fabricProgressDrawer" data-bs-backdrop="static" data-bs-keyboard="false">
         <div class="offcanvas-header">
             <h5 class="offcanvas-title">
-                <i class="bi bi-cloud-upload me-2"></i>Writing to Fabric Lakehouse
+                <i class="bi bi-cloud-upload me-2"></i>Writing to Fabric SQL
             </h5>
             <button type="button" class="btn-close" data-bs-dismiss="offcanvas" id="closeProgressDrawer" disabled></button>
         </div>
@@ -159,18 +173,19 @@
     </div>
 
     <script>
-    let capturedToken = null;
+    let fabricTokenAvailable = false;
     let fabricProgressDrawer = null;
     let fabricProgressInterval = null;
     let fabricStartTime = null;
     let fabricOperationId = null;
+    let fabricLogCursor = 0;
 
     // Update token status display
     function updateTokenStatus(message, type) {
-        const statusElement = document.getElementById('tokenStatus');
+        const statusElement = document.getElementById('fabricAuthBadge');
         const writeButton = document.getElementById('autoWriteFabric');
         
-        statusElement.textContent = `Token: ${message}`;
+        statusElement.textContent = message;
         
         if (type === 'success') {
             statusElement.className = 'badge bg-success me-2';
@@ -182,6 +197,7 @@
         } else {
             statusElement.className = 'badge bg-secondary me-2';
         }
+        writeButton.disabled = !fabricTokenAvailable;
     }
 
     // Initialize Fabric progress drawer
@@ -217,7 +233,8 @@
         document.getElementById('statsItems').textContent = '0';
         document.getElementById('statsTime').textContent = '00:00';
         document.getElementById('statsSpeed').textContent = '0/s';
-        document.getElementById('progressLog').innerHTML = '';
+        document.getElementById('progressLog').replaceChildren();
+        fabricLogCursor = 0;
         document.getElementById('cancelFabricWrite').disabled = false;
         document.getElementById('fabricWriteComplete').style.display = 'none';
         document.getElementById('closeProgressDrawer').disabled = true;
@@ -228,13 +245,7 @@
     // Add log entry to progress drawer
     function addProgressLog(message, type = 'info') {
         const logContainer = document.getElementById('progressLog');
-        const timestamp = new Date().toLocaleTimeString();
-        
-        const logEntry = document.createElement('div');
-        logEntry.className = `mb-1 text-${type}`;
-        logEntry.innerHTML = `<span class="text-muted">[${timestamp}]</span> ${message}`;
-        
-        logContainer.appendChild(logEntry);
+        window.SafeDOM.appendTimestampedLog(logContainer, message, type);
         
         // Auto-scroll to bottom
         const container = document.getElementById('progressLogContainer');
@@ -289,7 +300,8 @@
         fabricProgressInterval = setInterval(async () => {
             if (fabricOperationId) {
                 try {
-                    const response = await fetch(`/api/fabric_progress/${fabricOperationId}`);
+                    const operationId = encodeURIComponent(fabricOperationId);
+                    const response = await fetch(`/api/fabric_progress/${operationId}?after=${fabricLogCursor}`);
                     if (response.ok) {
                         const progressData = await response.json();
                         updateProgressFromServer(progressData);
@@ -316,6 +328,9 @@
             data.logs.forEach(log => {
                 addProgressLog(log.message, log.type || 'info');
             });
+        }
+        if (Number.isInteger(data.next_log_cursor)) {
+            fabricLogCursor = data.next_log_cursor;
         }
         
         if (data.completed) {
@@ -368,77 +383,13 @@
 
     // Clear progress log
     function clearProgressLog() {
-        document.getElementById('progressLog').innerHTML = '';
-    }
-
-    // Use manually entered token
-    function useManualToken() {
-        const manualToken = document.getElementById('manualToken').value.trim();
-        if (!manualToken) {
-            alert('Please enter a token');
-            return;
-        }
-
-        // Remove 'Bearer ' prefix if present
-        const cleanToken = manualToken.startsWith('Bearer ') ? manualToken.substring(7) : manualToken;
-        
-        if (cleanToken.length < 50) {
-            alert('Token seems to short. Please verify you copied the complete token.');
-            return;
-        }
-
-        // Basic token validation (JWT should start with eyJ)
-        if (!cleanToken.startsWith('eyJ')) {
-            alert('Token should start with "eyJ" (JWT format). Please check your token.');
-            return;
-        }
-
-        capturedToken = cleanToken;
-        
-        // Save token to localStorage for persistence across pages
-        localStorage.setItem('fabricToken', cleanToken);
-        
-        updateTokenStatus('Token saved and ready for use on Home page', 'success');
-        console.log('Manual token set and saved to localStorage:', cleanToken.substring(0, 50) + '...');
-        
-        // Clear the input for security
-        document.getElementById('manualToken').value = '';
-        
-        // Show success message
-        showTokenSuccessMessage();
-    }
-
-    // Show success message when token is entered
-    function showTokenSuccessMessage() {
-        const existingAlert = document.querySelector('.token-success-alert');
-        if (existingAlert) {
-            existingAlert.remove();
-        }
-        
-        const successAlert = document.createElement('div');
-        successAlert.className = 'alert alert-success alert-dismissible fade show token-success-alert';
-        successAlert.innerHTML = `
-            <strong>✅ Success!</strong> Bearer token has been captured and is ready for Fabric API calls.
-            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-        `;
-        
-        const container = document.querySelector('.container-custom');
-        const reportContainer = document.getElementById('powerbiContainer');
-        container.insertBefore(successAlert, reportContainer);
-        
-        // Auto-remove after 5 seconds
-        setTimeout(() => {
-            if (successAlert.parentNode) {
-                successAlert.remove();
-            }
-        }, 5000);
+        document.getElementById('progressLog').replaceChildren();
     }
 
     // Fabric Auth and Collection Progress functionality
     // Declare variables in global scope to avoid hoisting issues
     var fabricAuthDrawer = null;
     var collectionProgressDrawer = null;
-    var globalFabricToken = null;
     var fabricConnectionStatus = 'disconnected';
 
     // Initialize drawers on page load
@@ -524,14 +475,17 @@
             .then(response => response.json())
             .then(data => {
                 if (data.has_token) {
+                    fabricTokenAvailable = true;
                     updateFabricAuthUI('connected', 'Token stored in session');
+                    updateTokenStatus('Connected', 'success');
                     document.getElementById('currentTokenInfo').style.display = 'block';
                     document.getElementById('updateTokenBtn').style.display = 'block';
                     document.getElementById('clearTokenBtn').style.display = 'block';
                     document.getElementById('lastValidatedTime').textContent = data.last_validated || 'Unknown';
-                    globalFabricToken = 'stored';
                 } else {
+                    fabricTokenAvailable = false;
                     updateFabricAuthUI('disconnected', 'No token stored');
+                    updateTokenStatus('Not Connected', 'secondary');
                 }
             })
             .catch(error => {
@@ -573,7 +527,7 @@
         .then(response => response.json())
         .then(data => {
             if (data.status === 'success') {
-                globalFabricToken = token;
+                fabricTokenAvailable = true;
                 updateFabricAuthUI('connected', 'Token validated and stored');
                 addFabricLog('✅ Token validation successful');
                 addFabricLog('📝 Token stored in session');
@@ -587,9 +541,7 @@
                 // Clear token input for security
                 document.getElementById('fabricAuthToken').value = '';
                 
-                // Update the existing token system
-                capturedToken = token;
-                updateTokenStatus('Validated via Fabric Auth', 'success');
+                updateTokenStatus('Connected', 'success');
                 
             } else {
                 updateFabricAuthUI('error', data.message || 'Token validation failed');
@@ -627,7 +579,7 @@
         .then(response => response.json())
         .then(data => {
             if (data.status === 'success') {
-                globalFabricToken = null;
+                fabricTokenAvailable = false;
                 updateFabricAuthUI('disconnected', 'Token cleared');
                 addFabricLog('🗑️ Token cleared from session');
                 
@@ -636,9 +588,7 @@
                 document.getElementById('updateTokenBtn').style.display = 'none';
                 document.getElementById('clearTokenBtn').style.display = 'none';
                 
-                // Update existing token system
-                capturedToken = null;
-                updateTokenStatus('No Token', 'secondary');
+                updateTokenStatus('Not Connected', 'secondary');
                 
             } else {
                 addFabricLog('❌ Error clearing token: ' + (data.message || 'Unknown error'));
@@ -700,10 +650,7 @@
 
     function addFabricLog(message) {
         const log = document.getElementById('fabricLog');
-        const timestamp = new Date().toLocaleTimeString();
-        const logEntry = document.createElement('div');
-        logEntry.innerHTML = `<span class="text-muted">[${timestamp}]</span> ${message}`;
-        log.appendChild(logEntry);
+        window.SafeDOM.appendTimestampedLog(log, message);
         
         // Auto-scroll to bottom
         const container = document.getElementById('fabricLogContainer');
@@ -711,7 +658,7 @@
     }
 
     function clearFabricLog() {
-        document.getElementById('fabricLog').innerHTML = '';
+        document.getElementById('fabricLog').replaceChildren();
     }
 
     // Collection Progress functions
@@ -729,7 +676,7 @@
 
     // Write collected feedback to Fabric
     async function writeToFabricAuto() {
-        if (!capturedToken) {
+        if (!fabricTokenAvailable) {
             alert('No token available. Please enter your Bearer token first.');
             return;
         }
@@ -740,7 +687,7 @@
         // Show loading state
         writeButton.disabled = true;
         spinner.style.display = 'inline-block';
-        writeButton.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Starting...';
+        document.getElementById('writeButtonLabel').textContent = 'Starting...';
 
         // Show progress drawer
         showFabricProgressDrawer();
@@ -751,12 +698,12 @@
             const response = await fetch('/api/write_to_fabric_async', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ fabric_token: capturedToken })
+                body: JSON.stringify({})
             });
 
             const result = await response.json();
             
-            if (response.ok) {
+            if (response.ok && result.operation_id) {
                 fabricOperationId = result.operation_id;
                 addProgressLog(`✅ Operation started: ${result.operation_id}`, 'success');
                 addProgressLog(`📊 Processing ${result.total_items || 'unknown'} items...`, 'info');
@@ -764,6 +711,13 @@
                 
                 // Start polling for progress
                 startProgressUpdates();
+            } else if (response.ok) {
+                fabricOperationId = null;
+                completeFabricOperation(
+                    true,
+                    result.message || 'No feedback items were eligible for writing.'
+                );
+                updateTokenStatus('Connected - nothing to write', 'success');
             } else {
                 completeFabricOperation(false, result.message || 'Failed to start operation');
                 updateTokenStatus('Token error - check validity', 'error');
@@ -774,8 +728,8 @@
             updateTokenStatus('Network error occurred', 'error');
         } finally {
             // Reset button state
-            writeButton.disabled = !capturedToken; // Only enable if we still have a token
-            writeButton.innerHTML = 'Auto Write to Fabric';
+            writeButton.disabled = !fabricTokenAvailable;
+            document.getElementById('writeButtonLabel').textContent = 'Write to Fabric';
             spinner.style.display = 'none';
         }
     }
@@ -783,26 +737,16 @@
     // Debug function for troubleshooting
     window.debugTokenCapture = function() {
         console.log('=== DEBUG TOKEN CAPTURE ===');
-        console.log('Current captured token:', capturedToken ? `${capturedToken.substring(0, 50)}...` : 'No token');
-        console.log('Token status element:', document.getElementById('tokenStatus').textContent);
+        console.log('Fabric token available:', fabricTokenAvailable);
+        console.log('Token status element:', document.getElementById('fabricAuthBadge').textContent);
         console.log('Write button enabled:', !document.getElementById('autoWriteFabric').disabled);
         
         console.log('\n=== POWER BI IFRAME ===');
         const iframe = document.getElementById('powerbiReport');
-        console.log('Iframe src:', iframe.src);
-        console.log('Iframe loaded:', iframe.complete);
+        console.log('Iframe src:', iframe ? iframe.src : 'Not configured');
+        console.log('Iframe loaded:', iframe ? iframe.complete : false);
         
-        console.log('\n=== BROWSER STORAGE ===');
-        console.log('localStorage keys:', Object.keys(localStorage));
-        console.log('sessionStorage keys:', Object.keys(sessionStorage));
     };
-
-    // Allow Enter key to submit token
-    document.getElementById('manualToken').addEventListener('keypress', function(event) {
-        if (event.key === 'Enter') {
-            useManualToken();
-        }
-    });
 
     // Initialize page
     document.addEventListener('DOMContentLoaded', function() {

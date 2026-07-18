@@ -38,7 +38,7 @@ import os
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
@@ -77,7 +77,7 @@ STATE_COLUMNS = USER_EDIT_COLUMNS + USER_MODIFIABLE_CATEGORY_COLUMNS + (
 JSON_LIST_COLUMNS = ("Matched_Keywords", "Domains")
 
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 3
 
 
 _CREATE_FEEDBACK_SQL = """
@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS feedback (
     Created_by TEXT,
     Sentiment TEXT,
     Sentiment_Score REAL,
-    Sentiment_Confidence REAL,
+    Sentiment_Confidence TEXT,
     Url TEXT,
     Rawfeedback TEXT,
     Score INTEGER,
@@ -183,6 +183,30 @@ def _deserialise_value(column: str, value: Any) -> Any:
     return value
 
 
+def _neutralise_spreadsheet_formula(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    trimmed = value.lstrip()
+    if trimmed.startswith(("=", "+", "-", "@", "\t", "\r")):
+        return "'" + value
+    return value
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 class LocalStore:
     """Thread-safe SQLite-backed feedback store."""
 
@@ -191,7 +215,7 @@ class LocalStore:
         # SQLite supports concurrent readers but a single writer at a time.
         # A lock around write paths keeps Flask threads tidy.
         self._write_lock = threading.Lock()
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self._initialise()
 
     # ------------------------------------------------------------------
@@ -215,7 +239,8 @@ class LocalStore:
                 yield conn
                 conn.execute("COMMIT")
             except Exception:
-                conn.execute("ROLLBACK")
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
                 raise
             finally:
                 conn.close()
@@ -226,20 +251,155 @@ class LocalStore:
 
     def _initialise(self) -> None:
         with self._txn() as conn:
+            conn.execute(_CREATE_META_SQL)
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = ?",
+                ("schema_version",),
+            ).fetchone()
+            try:
+                current_version = int(row[0]) if row else 0
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("Local database has an invalid schema version") from exc
+
+            if current_version > _SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"Local database schema {current_version} is newer than "
+                    f"this application supports ({_SCHEMA_VERSION})"
+                )
+
+            for version in range(current_version + 1, _SCHEMA_VERSION + 1):
+                self._apply_migration(conn, version)
+                conn.execute(
+                    """
+                    INSERT INTO meta(key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    ("schema_version", str(version)),
+                )
+        logger.info(f"LocalStore ready at {self.db_path}")
+
+    def _apply_migration(self, conn: sqlite3.Connection, version: int) -> None:
+        if version == 1:
             conn.execute(_CREATE_FEEDBACK_SQL)
             conn.execute(_CREATE_STATE_SQL)
-            conn.execute(_CREATE_META_SQL)
-            conn.execute(
-                "INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)",
-                ("schema_version", str(_SCHEMA_VERSION)),
-            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_feedback_source ON feedback(Sources)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_feedback_state_state ON feedback_state(State)"
             )
-        logger.info(f"LocalStore ready at {self.db_path}")
+            return
+
+        if version == 2:
+            # Older development databases may predate fields now required by
+            # state-preserving upserts. ALTER only the columns that are absent.
+            self._add_column_if_missing(
+                conn,
+                "feedback",
+                "Extra_Json",
+                "TEXT",
+            )
+            self._add_column_if_missing(
+                conn,
+                "feedback",
+                "Auto_Recategorized_Date",
+                "TEXT",
+            )
+            self._add_column_if_missing(
+                conn,
+                "feedback_state",
+                "User_Modified_Categorization",
+                "INTEGER DEFAULT 0",
+            )
+            self._add_column_if_missing(
+                conn,
+                "feedback_state",
+                "Last_Updated",
+                "TEXT",
+            )
+            self._add_column_if_missing(
+                conn,
+                "feedback_state",
+                "Updated_By",
+                "TEXT",
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_feedback_created ON feedback(Created)"
+            )
+            return
+
+        if version == 3:
+            # Earlier builds copied automatic categorization into the state
+            # table. Preserve those values in Extra_Json before clearing the
+            # non-user overrides so upgrades cannot discard categorization.
+            rows = conn.execute(
+                """
+                SELECT
+                    f.Feedback_ID,
+                    f.Extra_Json,
+                    s.Primary_Domain,
+                    s.Enhanced_Category,
+                    s.Category,
+                    s.Subcategory,
+                    s.Feature_Area,
+                    s.Audience,
+                    s.Priority
+                FROM feedback f
+                INNER JOIN feedback_state s
+                    ON s.Feedback_ID = f.Feedback_ID
+                WHERE COALESCE(s.User_Modified_Categorization, 0) = 0
+                """
+            ).fetchall()
+            category_columns = USER_MODIFIABLE_CATEGORY_COLUMNS
+            for row in rows:
+                try:
+                    extras = json.loads(row["Extra_Json"] or "{}")
+                except (TypeError, ValueError):
+                    extras = {}
+                if not isinstance(extras, dict):
+                    extras = {}
+
+                changed = False
+                for column in category_columns:
+                    value = row[column]
+                    if value is not None and column not in extras:
+                        extras[column] = value
+                        changed = True
+                if changed:
+                    conn.execute(
+                        "UPDATE feedback SET Extra_Json = ? WHERE Feedback_ID = ?",
+                        (
+                            json.dumps(extras, default=str),
+                            row["Feedback_ID"],
+                        ),
+                    )
+
+            conn.execute(
+                """
+                UPDATE feedback_state
+                SET Primary_Domain = NULL,
+                    Enhanced_Category = NULL,
+                    Category = NULL,
+                    Subcategory = NULL,
+                    Feature_Area = NULL,
+                    Audience = NULL,
+                    Priority = NULL
+                WHERE COALESCE(User_Modified_Categorization, 0) = 0
+                """
+            )
+            return
+
+        raise RuntimeError(f"No migration is defined for schema version {version}")
+
+    def _add_column_if_missing(
+        self,
+        conn: sqlite3.Connection,
+        table: str,
+        column: str,
+        declaration: str,
+    ) -> None:
+        if column not in self._table_columns(conn, table):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
     def _table_columns(self, conn: sqlite3.Connection, table: str) -> List[str]:
         cur = conn.execute(f"PRAGMA table_info({table})")
@@ -348,7 +508,10 @@ class LocalStore:
                         for k, v in extras.items():
                             item.setdefault(k, v)
                 except (ValueError, TypeError):
-                    pass
+                    logger.warning(
+                        "Ignoring invalid Extra_Json for feedback ID %s",
+                        item.get("Feedback_ID"),
+                    )
 
             items.append(item)
         return items
@@ -394,31 +557,63 @@ class LocalStore:
                 row[0]
                 for row in conn.execute("SELECT Feedback_ID FROM feedback").fetchall()
             }
+            existing_extras: Dict[str, Dict[str, Any]] = {}
+            for existing_row in conn.execute(
+                """
+                SELECT Feedback_ID, Extra_Json
+                FROM feedback
+                WHERE Extra_Json IS NOT NULL
+                """
+            ).fetchall():
+                try:
+                    parsed = json.loads(existing_row[1])
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "Ignoring invalid stored Extra_Json for feedback ID %s",
+                        existing_row[0],
+                    )
+                    continue
+                if isinstance(parsed, dict):
+                    existing_extras[existing_row[0]] = parsed
 
             for item in items:
                 fid = item.get("Feedback_ID")
                 if not fid:
                     skipped += 1
                     continue
+                if not isinstance(fid, str) or len(fid) > 200:
+                    logger.warning("Skipping feedback item with an invalid ID")
+                    skipped += 1
+                    continue
 
                 row, extras = self._split_known_columns(item, feedback_cols)
                 row["Feedback_ID"] = fid
-                if extras:
-                    row["Extra_Json"] = json.dumps(extras, default=str)
 
                 is_existing = fid in existing_ids
                 if is_existing and fid in user_modified_ids:
                     # Don't overwrite categorisation columns the user
                     # explicitly changed.
+                    previous_extras = existing_extras.get(fid, {})
                     for col in USER_MODIFIABLE_CATEGORY_COLUMNS:
                         row.pop(col, None)
+                        extras.pop(col, None)
+                        if col in previous_extras:
+                            extras[col] = previous_extras[col]
+                if extras:
+                    row["Extra_Json"] = json.dumps(extras, default=str)
 
                 cols = list(row.keys())
                 placeholders = ",".join("?" for _ in cols)
                 values = [_serialise_value(c, row[c]) for c in cols]
 
                 if is_existing:
-                    set_clause = ",".join(f"{c}=excluded.{c}" for c in cols if c != "Feedback_ID")
+                    update_cols = [c for c in cols if c != "Feedback_ID"]
+                    if not update_cols:
+                        updated += 1
+                        continue
+                    set_clause = ",".join(
+                        f"{c}=excluded.{c}" for c in update_cols
+                    )
                     sql = (
                         f"INSERT INTO feedback ({','.join(cols)}) VALUES ({placeholders}) "
                         f"ON CONFLICT(Feedback_ID) DO UPDATE SET {set_clause}"
@@ -431,22 +626,40 @@ class LocalStore:
                         f"ON CONFLICT(Feedback_ID) DO NOTHING"
                     )
                     conn.execute(sql, values)
+                    existing_ids.add(fid)
                     inserted += 1
 
                 # Make sure a feedback_state row exists, but never reset it.
+                user_modified = int(
+                    bool(item.get("User_Modified_Categorization"))
+                )
                 state_seed = {
                     "Feedback_ID": fid,
                     "State": item.get("State") or "NEW",
                     "Feedback_Notes": item.get("Feedback_Notes") or "",
-                    "Primary_Domain": item.get("Primary_Domain"),
-                    "Enhanced_Category": item.get("Enhanced_Category"),
-                    "Category": item.get("Category"),
-                    "Subcategory": item.get("Subcategory"),
-                    "Feature_Area": item.get("Feature_Area"),
-                    "Audience": item.get("Audience"),
-                    "Priority": item.get("Priority"),
-                    "User_Modified_Categorization": 0,
-                    "Last_Updated": item.get("Last_Updated") or datetime.utcnow().isoformat(),
+                    "Primary_Domain": (
+                        item.get("Primary_Domain") if user_modified else None
+                    ),
+                    "Enhanced_Category": (
+                        item.get("Enhanced_Category") if user_modified else None
+                    ),
+                    "Category": (
+                        item.get("Category") if user_modified else None
+                    ),
+                    "Subcategory": (
+                        item.get("Subcategory") if user_modified else None
+                    ),
+                    "Feature_Area": (
+                        item.get("Feature_Area") if user_modified else None
+                    ),
+                    "Audience": (
+                        item.get("Audience") if user_modified else None
+                    ),
+                    "Priority": (
+                        item.get("Priority") if user_modified else None
+                    ),
+                    "User_Modified_Categorization": user_modified,
+                    "Last_Updated": item.get("Last_Updated") or datetime.now(timezone.utc).isoformat(),
                     "Updated_By": item.get("Updated_By") or "System",
                 }
                 cols2 = list(state_seed.keys())
@@ -469,9 +682,10 @@ class LocalStore:
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Partition a feedback dict into (known feedback cols, extras)."""
         known_set = set(known)
-        # Don't store state-only columns inside the feedback table - they
-        # belong on feedback_state.
-        ignore = set(STATE_COLUMNS)
+        # Workflow state and audit fields belong only on feedback_state.
+        # Automatic category values remain in Extra_Json; user overrides are
+        # separately overlaid from feedback_state when the row is loaded.
+        ignore = set(USER_EDIT_COLUMNS) | {"User_Modified_Categorization"}
         row: Dict[str, Any] = {}
         extras: Dict[str, Any] = {}
         for k, v in item.items():
@@ -503,8 +717,12 @@ class LocalStore:
         updated_by: Optional[str] = None,
         mark_user_modified: bool = False,
     ) -> bool:
-        """Persist a partial state update. Returns True if a row exists/was created."""
-        if not feedback_id:
+        """Persist a partial state update for an existing feedback item."""
+        if (
+            not isinstance(feedback_id, str)
+            or not feedback_id
+            or len(feedback_id) > 200
+        ):
             return False
 
         updates: Dict[str, Any] = {}
@@ -529,10 +747,17 @@ class LocalStore:
         if mark_user_modified:
             updates["User_Modified_Categorization"] = 1
 
-        updates["Last_Updated"] = datetime.utcnow().isoformat()
+        updates["Last_Updated"] = datetime.now(timezone.utc).isoformat()
         updates["Updated_By"] = updated_by or "user"
 
         with self._txn() as conn:
+            feedback_exists = conn.execute(
+                "SELECT 1 FROM feedback WHERE Feedback_ID = ?",
+                (feedback_id,),
+            ).fetchone() is not None
+            if not feedback_exists:
+                return False
+
             cur = conn.execute(
                 "SELECT 1 FROM feedback_state WHERE Feedback_ID = ?",
                 (feedback_id,),
@@ -544,16 +769,6 @@ class LocalStore:
                 sql = f"UPDATE feedback_state SET {set_clause} WHERE Feedback_ID = ?"
                 conn.execute(sql, [*updates.values(), feedback_id])
             else:
-                # Need to ensure a feedback row exists too (FK constraint).
-                feedback_exists = conn.execute(
-                    "SELECT 1 FROM feedback WHERE Feedback_ID = ?",
-                    (feedback_id,),
-                ).fetchone() is not None
-                if not feedback_exists:
-                    conn.execute(
-                        "INSERT INTO feedback (Feedback_ID) VALUES (?) ON CONFLICT(Feedback_ID) DO NOTHING",
-                        (feedback_id,),
-                    )
                 cols = ["Feedback_ID", *updates.keys()]
                 placeholders = ",".join("?" for _ in cols)
                 values = [feedback_id, *updates.values()]
@@ -568,40 +783,133 @@ class LocalStore:
     # ------------------------------------------------------------------
 
     def bulk_upsert_states(self, state_rows: Iterable[Dict[str, Any]]) -> int:
-        """Upsert pre-built state rows. Returns count of rows touched."""
+        """Merge Fabric state rows into existing local feedback items."""
+        aliases = {
+            "State": ("State", "state"),
+            "Feedback_Notes": ("Feedback_Notes", "notes"),
+            "Primary_Domain": ("Primary_Domain", "domain"),
+            "Enhanced_Category": ("Enhanced_Category", "enhanced_category"),
+            "Category": ("Category", "category"),
+            "Subcategory": ("Subcategory", "subcategory"),
+            "Feature_Area": ("Feature_Area", "feature_area"),
+            "Audience": ("Audience", "audience"),
+            "Priority": ("Priority", "priority"),
+            "User_Modified_Categorization": (
+                "User_Modified_Categorization",
+                "user_modified_categorization",
+            ),
+            "Last_Updated": ("Last_Updated", "last_updated"),
+            "Updated_By": ("Updated_By", "updated_by"),
+        }
         count = 0
         with self._txn() as conn:
             for row in state_rows:
                 fid = row.get("Feedback_ID") or row.get("feedback_id")
-                if not fid:
+                if (
+                    not isinstance(fid, str)
+                    or not fid
+                    or len(fid) > 200
+                ):
                     continue
-                payload = {
-                    "Feedback_ID": fid,
-                    "State": row.get("State") or row.get("state"),
-                    "Feedback_Notes": row.get("Feedback_Notes") or row.get("notes"),
-                    "Primary_Domain": row.get("Primary_Domain") or row.get("domain"),
-                    "Enhanced_Category": row.get("Enhanced_Category"),
-                    "Category": row.get("Category"),
-                    "Subcategory": row.get("Subcategory"),
-                    "Feature_Area": row.get("Feature_Area"),
-                    "Audience": row.get("Audience"),
-                    "Priority": row.get("Priority"),
-                    "User_Modified_Categorization": int(bool(row.get("User_Modified_Categorization", 0))),
-                    "Last_Updated": row.get("Last_Updated") or row.get("last_updated") or datetime.utcnow().isoformat(),
-                    "Updated_By": row.get("Updated_By") or row.get("updated_by") or "fabric_sync",
-                }
-                conn.execute(
-                    "INSERT INTO feedback (Feedback_ID) VALUES (?) ON CONFLICT(Feedback_ID) DO NOTHING",
+
+                feedback_exists = conn.execute(
+                    "SELECT 1 FROM feedback WHERE Feedback_ID = ?",
                     (fid,),
-                )
-                cols = list(payload.keys())
-                placeholders = ",".join("?" for _ in cols)
-                set_clause = ",".join(f"{c}=excluded.{c}" for c in cols if c != "Feedback_ID")
-                conn.execute(
-                    f"INSERT INTO feedback_state ({','.join(cols)}) VALUES ({placeholders}) "
-                    f"ON CONFLICT(Feedback_ID) DO UPDATE SET {set_clause}",
-                    [payload[c] for c in cols],
-                )
+                ).fetchone()
+                if feedback_exists is None:
+                    logger.warning(
+                        "Skipping Fabric state for unknown feedback ID %s",
+                        fid,
+                    )
+                    continue
+
+                updates: Dict[str, Any] = {}
+                for column, candidate_keys in aliases.items():
+                    for key in candidate_keys:
+                        if key in row:
+                            updates[column] = row[key]
+                            break
+
+                if not updates.get("Last_Updated"):
+                    updates["Last_Updated"] = datetime.now(timezone.utc).isoformat()
+                if not updates.get("Updated_By"):
+                    updates["Updated_By"] = "fabric_sync"
+                if "User_Modified_Categorization" in updates:
+                    updates["User_Modified_Categorization"] = int(
+                        bool(updates["User_Modified_Categorization"])
+                    )
+
+                existing_state = conn.execute(
+                    """
+                    SELECT
+                        Last_Updated,
+                        Updated_By,
+                        User_Modified_Categorization
+                    FROM feedback_state
+                    WHERE Feedback_ID = ?
+                    """,
+                    (fid,),
+                ).fetchone()
+                if existing_state is not None:
+                    existing_user_modified = bool(existing_state[2])
+                    incoming_user_modified = bool(
+                        updates.get("User_Modified_Categorization")
+                    )
+                    if (
+                        existing_user_modified
+                        and not incoming_user_modified
+                    ):
+                        for column in USER_MODIFIABLE_CATEGORY_COLUMNS:
+                            updates.pop(column, None)
+
+                    incoming_timestamp = _parse_timestamp(
+                        updates.get("Last_Updated")
+                    )
+                    existing_timestamp = _parse_timestamp(
+                        existing_state["Last_Updated"]
+                    )
+                    existing_actor = str(
+                        existing_state["Updated_By"] or ""
+                    ).casefold()
+                    if (
+                        incoming_timestamp is not None
+                        and existing_timestamp is not None
+                        and existing_actor != "system"
+                        and incoming_timestamp < existing_timestamp
+                    ):
+                        logger.info(
+                            "Skipping older Fabric state for feedback ID %s",
+                            fid,
+                        )
+                        continue
+
+                if existing_state is None:
+                    payload = {"Feedback_ID": fid, **updates}
+                    cols = list(payload.keys())
+                    placeholders = ",".join("?" for _ in cols)
+                    conn.execute(
+                        f"INSERT INTO feedback_state ({','.join(cols)}) "
+                        f"VALUES ({placeholders})",
+                        [_serialise_value(c, payload[c]) for c in cols],
+                    )
+                else:
+                    assignments = []
+                    values = []
+                    for column, value in updates.items():
+                        if column == "User_Modified_Categorization":
+                            assignments.append(
+                                "User_Modified_Categorization = "
+                                "CASE WHEN User_Modified_Categorization = 1 OR ? = 1 "
+                                "THEN 1 ELSE 0 END"
+                            )
+                        else:
+                            assignments.append(f"{column} = ?")
+                        values.append(_serialise_value(column, value))
+                    conn.execute(
+                        f"UPDATE feedback_state SET {','.join(assignments)} "
+                        "WHERE Feedback_ID = ?",
+                        [*values, fid],
+                    )
                 count += 1
         return count
 
@@ -614,6 +922,7 @@ class LocalStore:
         target_dir: str,
         columns: Optional[List[str]] = None,
         prefix: str = "feedback",
+        rows: Optional[Iterable[Dict[str, Any]]] = None,
     ) -> str:
         """Write the joined view to a timestamped CSV. Returns the file path."""
         os.makedirs(target_dir, exist_ok=True)
@@ -621,7 +930,7 @@ class LocalStore:
         filename = f"{prefix}_{timestamp}.csv"
         filepath = os.path.join(target_dir, filename)
 
-        rows = self.load_all()
+        rows = self.load_all() if rows is None else list(rows)
         if not rows:
             # Still produce an empty file with the headers so downstream
             # tooling doesn't error.
@@ -639,6 +948,12 @@ class LocalStore:
                     df[col] = df[col].apply(
                         lambda v: json.dumps(v) if isinstance(v, (list, dict)) else v
                     )
+
+            # Spreadsheet applications treat leading =, +, -, and @ as
+            # formulas. Prefix user-controlled text so exports remain data.
+            for col in df.columns:
+                if df[col].dtype == object:
+                    df[col] = df[col].apply(_neutralise_spreadsheet_formula)
 
         df.to_csv(filepath, index=False, encoding="utf-8-sig")
         logger.info(f"Exported {len(df)} feedback rows to {filepath}")
@@ -705,6 +1020,10 @@ class LocalStore:
                 if not fid:
                     fid = FeedbackIDGenerator.generate_id_from_feedback_dict(record)
                     record["Feedback_ID"] = fid
+                elif len(fid) > 200:
+                    raise ValueError(
+                        "CSV Feedback_ID values must not exceed 200 characters"
+                    )
 
                 already_exists = fid in existing_feedback
 
@@ -722,12 +1041,16 @@ class LocalStore:
                 values = [_serialise_value(c, row[c]) for c in cols]
 
                 if already_exists:
-                    set_clause = ",".join(f"{c}=excluded.{c}" for c in cols if c != "Feedback_ID")
-                    conn.execute(
-                        f"INSERT INTO feedback ({','.join(cols)}) VALUES ({placeholders}) "
-                        f"ON CONFLICT(Feedback_ID) DO UPDATE SET {set_clause}",
-                        values,
-                    )
+                    update_cols = [c for c in cols if c != "Feedback_ID"]
+                    if update_cols:
+                        set_clause = ",".join(
+                            f"{c}=excluded.{c}" for c in update_cols
+                        )
+                        conn.execute(
+                            f"INSERT INTO feedback ({','.join(cols)}) VALUES ({placeholders}) "
+                            f"ON CONFLICT(Feedback_ID) DO UPDATE SET {set_clause}",
+                            values,
+                        )
                     updated_count += 1
                 else:
                     conn.execute(
@@ -744,21 +1067,47 @@ class LocalStore:
                     or mode == "overwrite"
                 )
                 if should_write_state:
+                    user_modified = int(
+                        str(
+                            record.get(
+                                "User_Modified_Categorization",
+                                "0",
+                            )
+                        )
+                        in {"1", "True", "true"}
+                    )
                     state_payload = {
                         "Feedback_ID": fid,
                         "State": record.get("State") or "NEW",
                         "Feedback_Notes": record.get("Feedback_Notes") or "",
-                        "Primary_Domain": record.get("Primary_Domain"),
-                        "Enhanced_Category": record.get("Enhanced_Category"),
-                        "Category": record.get("Category"),
-                        "Subcategory": record.get("Subcategory"),
-                        "Feature_Area": record.get("Feature_Area"),
-                        "Audience": record.get("Audience"),
-                        "Priority": record.get("Priority"),
-                        "User_Modified_Categorization": int(
-                            str(record.get("User_Modified_Categorization", "0")) in {"1", "True", "true"}
+                        "Primary_Domain": (
+                            record.get("Primary_Domain")
+                            if user_modified
+                            else None
                         ),
-                        "Last_Updated": record.get("Last_Updated") or datetime.utcnow().isoformat(),
+                        "Enhanced_Category": (
+                            record.get("Enhanced_Category")
+                            if user_modified
+                            else None
+                        ),
+                        "Category": (
+                            record.get("Category") if user_modified else None
+                        ),
+                        "Subcategory": (
+                            record.get("Subcategory") if user_modified else None
+                        ),
+                        "Feature_Area": (
+                            record.get("Feature_Area") if user_modified else None
+                        ),
+                        "Audience": (
+                            record.get("Audience") if user_modified else None
+                        ),
+                        "Priority": (
+                            record.get("Priority") if user_modified else None
+                        ),
+                        "User_Modified_Categorization": user_modified,
+                        "Last_Updated": record.get("Last_Updated")
+                        or datetime.now(timezone.utc).isoformat(),
                         "Updated_By": record.get("Updated_By") or "csv_import",
                     }
                     cols2 = list(state_payload.keys())

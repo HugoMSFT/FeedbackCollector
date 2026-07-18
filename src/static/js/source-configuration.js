@@ -587,7 +587,7 @@ class SourceConfigManager {
                     <div class="config-field">
                         <label class="fluent-label">Subreddit:</label>
                         <input type="text" class="fluent-input source-input" 
-                               data-field="subreddit" value="${source.subreddit}">
+                               data-field="subreddit" value="${window.SafeDOM.escapeAttribute(source.subreddit)}">
                     </div>
                     <div class="config-field-row">
                         <div class="config-field">
@@ -614,7 +614,7 @@ class SourceConfigManager {
                     <div class="config-field">
                         <label class="fluent-label">Max Items:</label>
                         <input type="number" class="fluent-input source-input" 
-                               data-field="maxItems" value="${source.maxItems}" min="1" max="1000">
+                               data-field="maxItems" value="${window.SafeDOM.finiteNumber(source.maxItems, 5)}" min="1" max="1000">
                     </div>
                     <div class="source-info">
                         <span>Last collected: Never</span>
@@ -633,7 +633,7 @@ class SourceConfigManager {
                                 <span class="fluent-toggle-slider"></span>
                             </label>
                             <div style="flex: 1;">
-                                <strong>${repo.owner}/${repo.repo}</strong>
+                                <strong>${window.SafeDOM.escapeHtml(repo.owner)}/${window.SafeDOM.escapeHtml(repo.repo)}</strong>
                             </div>
                             <button class="fluent-button-icon btn-remove-github-repo" 
                                     data-repo-index="${index}" 
@@ -677,7 +677,7 @@ class SourceConfigManager {
                     <div class="config-field">
                         <label class="fluent-label">Max Items per Repository:</label>
                         <input type="number" class="fluent-input source-input" 
-                               data-field="maxItems" value="${source.maxItems}" min="1" max="1000">
+                               data-field="maxItems" value="${window.SafeDOM.finiteNumber(source.maxItems, 5)}" min="1" max="1000">
                     </div>
                     <div class="fluent-alert fluent-alert-info">
                         <i class="bi bi-info-circle"></i>
@@ -699,7 +699,7 @@ class SourceConfigManager {
                                 <span class="fluent-toggle-slider"></span>
                             </label>
                             <div style="flex: 1;">
-                                <strong>${repo.owner}/${repo.repo}</strong>
+                                <strong>${window.SafeDOM.escapeHtml(repo.owner)}/${window.SafeDOM.escapeHtml(repo.repo)}</strong>
                             </div>
                             <button class="fluent-button-icon btn-remove-repo" 
                                     data-repo-index="${index}" 
@@ -743,7 +743,7 @@ class SourceConfigManager {
                     <div class="config-field">
                         <label class="fluent-label">Max Items per Repository:</label>
                         <input type="number" class="fluent-input source-input" 
-                               data-field="maxItems" value="${source.maxItems}" min="1" max="1000">
+                               data-field="maxItems" value="${window.SafeDOM.finiteNumber(source.maxItems, 5)}" min="1" max="1000">
                     </div>
                     <div class="fluent-alert fluent-alert-info">
                         <i class="bi bi-info-circle"></i>
@@ -759,7 +759,7 @@ class SourceConfigManager {
                     <div class="config-field">
                         <label class="fluent-label">Max Items:</label>
                         <input type="number" class="fluent-input source-input" 
-                               data-field="maxItems" value="${source.maxItems}" min="1" max="1000">
+                               data-field="maxItems" value="${window.SafeDOM.finiteNumber(source.maxItems, 5)}" min="1" max="1000">
                     </div>
                     <div class="fluent-alert fluent-alert-info">
                         <i class="bi bi-info-circle"></i>
@@ -776,7 +776,7 @@ class SourceConfigManager {
                     <div class="config-field">
                         <label class="fluent-label">Parent Work Item ID:</label>
                         <input type="text" class="fluent-input source-input" 
-                               data-field="parentWorkItem" value="${source.parentWorkItem}">
+                               data-field="parentWorkItem" value="${window.SafeDOM.escapeAttribute(source.parentWorkItem)}">
                     </div>
                     <div class="config-field">
                         <label class="fluent-label">Work Item Types:</label>
@@ -790,7 +790,7 @@ class SourceConfigManager {
                     <div class="config-field">
                         <label class="fluent-label">Max Items:</label>
                         <input type="number" class="fluent-input source-input" 
-                               data-field="maxItems" value="${source.maxItems}" min="1" max="1000">
+                               data-field="maxItems" value="${window.SafeDOM.finiteNumber(source.maxItems, 5)}" min="1" max="1000">
                     </div>
                     <div class="source-info">
                         <span>Last collected: Never</span>

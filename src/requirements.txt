@@ -1,9 +1,10 @@
-praw==7.8.1
 beautifulsoup4==4.12.2
-requests==2.31.0
-python-dotenv==1.0.0
+Flask==3.1.0
 nltk==3.8.1
-textblob==0.17.1
-flask==2.3.2
-pandas
-azure-storage-file-datalake
+pandas==2.2.3
+praw==7.8.1
+pyodbc==5.2.0
+python-dotenv==1.0.1
+requests==2.32.3
+textblob==0.18.0.post0
+Werkzeug==3.1.8

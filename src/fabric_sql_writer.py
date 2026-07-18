@@ -12,11 +12,54 @@ except ImportError:
 import pandas as pd
 import json
 import logging
-from datetime import datetime
-from typing import List, Dict, Any
-from config import FABRIC_SQL_SERVER, FABRIC_SQL_DATABASE, FABRIC_SQL_AUTHENTICATION
+import math
+import struct
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional
+from config import FABRIC_SQL_SERVER, FABRIC_SQL_DATABASE
 
 logger = logging.getLogger(__name__)
+
+
+_FABRIC_ALWAYS_SYNC_COLUMNS = (
+    "Title",
+    "Content",
+    "Source",
+    "Source_URL",
+    "Author",
+    "Created_Date",
+    "Sentiment",
+    "Sentiment_Score",
+    "Sentiment_Confidence",
+    "Feedback_Gist",
+    "Area",
+    "Scenario",
+    "Tag",
+    "Organization",
+    "Status",
+    "Created_by",
+    "Rawfeedback",
+    "Matched_Keywords",
+)
+
+_FABRIC_CATEGORY_COLUMNS = (
+    "Primary_Category",
+    "Enhanced_Category",
+    "Audience",
+    "Priority",
+    "Impacttype",
+    "Category",
+    "Subcategory",
+    "Feature_Area",
+    "Categorization_Confidence",
+    "Primary_Domain",
+    "Domains",
+    "Auto_Recategorized_Date",
+)
+
+
+class FabricWriteCancelled(RuntimeError):
+    """Raised when a caller cancels a cooperative Fabric write."""
 
 
 def _require_pyodbc():
@@ -34,7 +77,6 @@ class FabricSQLWriter:
         self.bearer_token = bearer_token
         self.server = FABRIC_SQL_SERVER
         self.database = FABRIC_SQL_DATABASE
-        self.auth_method = FABRIC_SQL_AUTHENTICATION
         self.current_user = None  # Will be set after connection
 
         # Validate that required configuration is present
@@ -42,55 +84,26 @@ class FabricSQLWriter:
             raise ValueError("FABRIC_SQL_SERVER and FABRIC_SQL_DATABASE must be configured in .env file")
 
     def connect_interactive(self):
-        """Connect using interactive Azure AD authentication (for development)"""
+        """Reject interactive authentication in the web application."""
+        raise RuntimeError(
+            "Interactive Fabric authentication is not supported. "
+            "Validate a bearer token through the application first."
+        )
 
-        # Try multiple driver names in order of preference
-        drivers_to_try = [
-            "ODBC Driver 18 for SQL Server",
-            "ODBC Driver 17 for SQL Server",
-            "ODBC Driver 13 for SQL Server",
-            "SQL Server Native Client 11.0",
-            "SQL Server",
-        ]
-
-        for driver_name in drivers_to_try:
-            try:
-                logger.info(f"Trying to connect with driver: {driver_name}")
-
-                if driver_name == "SQL Server":
-                    # Older driver doesn't support Azure AD Interactive, try different approach
-                    connection_string = f"""
-                    DRIVER={{{driver_name}}};
-                    SERVER={self.server};
-                    DATABASE={self.database};
-                    Encrypt=yes;
-                    TrustServerCertificate=no;
-                    Integrated Security=SSPI;
-                    """
-                else:
-                    # Modern drivers support Azure AD Interactive
-                    connection_string = f"""
-                    DRIVER={{{driver_name}}};
-                    SERVER={self.server};
-                    DATABASE={self.database};
-                    Encrypt=yes;
-                    TrustServerCertificate=no;
-                    Authentication=ActiveDirectoryInteractive;
-                    """
-
-                conn = pyodbc.connect(connection_string)
-                logger.info(f"Successfully connected to Fabric SQL database using driver: {driver_name}")
-                return conn
-
-            except Exception as e:
-                logger.warning(f"Driver {driver_name} failed: {e}")
-                continue
-
-        # If all drivers failed
-        raise Exception(f"Failed to connect with any available driver. Available drivers: {pyodbc.drivers()}")
+    def _connect(self):
+        if not self.bearer_token:
+            raise ValueError("A validated Fabric bearer token is required")
+        return self.connect_with_token(self.bearer_token)
 
     def connect_with_token(self, bearer_token: str):
         """Connect using bearer token (for production)"""
+        if not isinstance(bearer_token, str) or not bearer_token.strip():
+            raise ValueError("A Fabric bearer token is required")
+        bearer_token = bearer_token.strip()
+        if bearer_token.lower().startswith("bearer "):
+            bearer_token = bearer_token[7:].strip()
+        if not bearer_token:
+            raise ValueError("A Fabric bearer token is required")
 
         # Try multiple driver names in order of preference
         drivers_to_try = [
@@ -112,11 +125,21 @@ class FabricSQLWriter:
                 TrustServerCertificate=no;
                 """
 
-                # Convert bearer token to bytes for ODBC
+                # SQL_COPT_SS_ACCESS_TOKEN expects a length-prefixed UTF-16-LE
+                # ACCESSTOKEN structure, not the raw token bytes.
                 token_bytes = bearer_token.encode("utf-16-le")
+                token_struct = struct.pack(
+                    f"<I{len(token_bytes)}s",
+                    len(token_bytes),
+                    token_bytes,
+                )
 
                 # Use token for authentication (SQL_COPT_SS_ACCESS_TOKEN = 1256)
-                conn = pyodbc.connect(connection_string, attrs_before={1256: token_bytes})
+                conn = pyodbc.connect(
+                    connection_string,
+                    attrs_before={1256: token_struct},
+                    timeout=30,
+                )
                 logger.info(
                     f"Successfully connected to Fabric SQL database using bearer token with driver: {driver_name}"
                 )
@@ -150,9 +173,9 @@ class FabricSQLWriter:
 
             create_table_sql = """
             CREATE TABLE FeedbackState (
-                Feedback_ID NVARCHAR(50) PRIMARY KEY,
+                Feedback_ID NVARCHAR(200) PRIMARY KEY,
                 State NVARCHAR(20),
-                Feedback_Notes NTEXT,
+                Feedback_Notes NVARCHAR(MAX),
                 Primary_Domain NVARCHAR(100),
                 Category NVARCHAR(100),
                 Subcategory NVARCHAR(200),
@@ -172,14 +195,11 @@ class FabricSQLWriter:
     def migrate_feedback_state_table(self, conn):
         """Add missing columns to existing FeedbackState table"""
         cursor = conn.cursor()
-
-        # List of new columns to add
         new_columns = ["Category NVARCHAR(100)", "Subcategory NVARCHAR(200)", "Feature_Area NVARCHAR(200)"]
 
-        for column_def in new_columns:
-            column_name = column_def.split()[0]
-            try:
-                # Check if column exists
+        try:
+            for column_def in new_columns:
+                column_name = column_def.split()[0]
                 cursor.execute(
                     """
                     SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
@@ -189,18 +209,19 @@ class FabricSQLWriter:
                 )
 
                 column_exists = cursor.fetchone()[0] > 0
-
                 if not column_exists:
-                    # Add the missing column
-                    alter_sql = f"ALTER TABLE FeedbackState ADD {column_def}"
-                    cursor.execute(alter_sql)
-                    conn.commit()
-                    logger.info(f"✅ Added missing column to FeedbackState: {column_name}")
-                else:
-                    logger.debug(f"Column {column_name} already exists in FeedbackState")
+                    cursor.execute(f"ALTER TABLE FeedbackState ADD {column_def}")
+                    logger.info(
+                        "Added missing column to FeedbackState: %s",
+                        column_name,
+                    )
 
-            except Exception as e:
-                logger.error(f"❌ Error adding column {column_name} to FeedbackState: {e}")
+            self._widen_feedback_id_column(conn, "FeedbackState")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.exception("Unable to migrate FeedbackState")
+            raise
 
     def get_current_user(self, conn):
         """Get the current authenticated user from SQL connection"""
@@ -240,14 +261,16 @@ class FabricSQLWriter:
 
             create_table_sql = """
             CREATE TABLE Feedback (
-                Feedback_ID NVARCHAR(50) PRIMARY KEY,
+                Feedback_ID NVARCHAR(200) PRIMARY KEY,
                 Title NVARCHAR(500),
-                Content NTEXT,
+                Content NVARCHAR(MAX),
                 Source NVARCHAR(50),
                 Source_URL NVARCHAR(1000),
                 Author NVARCHAR(100),
                 Created_Date DATETIME2,
                 Sentiment NVARCHAR(20),
+                Sentiment_Score FLOAT,
+                Sentiment_Confidence NVARCHAR(20),
                 Primary_Category NVARCHAR(100),
                 Enhanced_Category NVARCHAR(200),
                 Audience NVARCHAR(50),
@@ -261,18 +284,17 @@ class FabricSQLWriter:
                 Organization NVARCHAR(200),
                 Status NVARCHAR(50),
                 Created_by NVARCHAR(100),
-                Rawfeedback NTEXT,
+                Rawfeedback NVARCHAR(MAX),
                 Category NVARCHAR(100),
                 Subcategory NVARCHAR(200),
                 Feature_Area NVARCHAR(200),
                 Categorization_Confidence FLOAT,
                 Primary_Domain NVARCHAR(100),
-                Domains NTEXT, -- Store as JSON string
-                Matched_Keywords NTEXT, -- Store matched keywords as JSON array
+                Domains NVARCHAR(MAX), -- Store as JSON string
+                Matched_Keywords NVARCHAR(MAX), -- Store matched keywords as JSON array
                 User_Modified_Categorization BIT DEFAULT 0, -- Flag to protect user changes from auto-recategorization
                 Auto_Recategorized_Date DATETIME2, -- Timestamp of last automatic recategorization
-                Collected_Date DATETIME2 DEFAULT GETDATE(),
-                CONSTRAINT UK_Feedback_ID UNIQUE (Feedback_ID)
+                Collected_Date DATETIME2 DEFAULT GETDATE()
             );
             """
 
@@ -297,22 +319,23 @@ class FabricSQLWriter:
             "Organization NVARCHAR(200)",
             "Status NVARCHAR(50)",
             "Created_by NVARCHAR(100)",
-            "Rawfeedback NTEXT",
+            "Rawfeedback NVARCHAR(MAX)",
             "Category NVARCHAR(100)",
             "Subcategory NVARCHAR(200)",
             "Feature_Area NVARCHAR(200)",
             "Categorization_Confidence FLOAT",
             "Primary_Domain NVARCHAR(100)",
-            "Domains NTEXT",
-            "Matched_Keywords NTEXT",
+            "Domains NVARCHAR(MAX)",
+            "Matched_Keywords NVARCHAR(MAX)",
+            "Sentiment_Score FLOAT",
+            "Sentiment_Confidence NVARCHAR(20)",
             "User_Modified_Categorization BIT DEFAULT 0",
             "Auto_Recategorized_Date DATETIME2",
         ]
 
-        for column_def in new_columns:
-            column_name = column_def.split()[0]
-            try:
-                # Check if column exists
+        try:
+            for column_def in new_columns:
+                column_name = column_def.split()[0]
                 cursor.execute(
                     """
                     SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
@@ -322,63 +345,174 @@ class FabricSQLWriter:
                 )
 
                 column_exists = cursor.fetchone()[0] > 0
-
                 if not column_exists:
-                    # Add the missing column
-                    alter_sql = f"ALTER TABLE Feedback ADD {column_def}"
-                    cursor.execute(alter_sql)
-                    conn.commit()
-                    logger.info(f"✅ Added missing column: {column_name}")
-                else:
-                    logger.debug(f"Column {column_name} already exists")
+                    cursor.execute(f"ALTER TABLE Feedback ADD {column_def}")
+                    logger.info("Added missing Feedback column: %s", column_name)
 
-            except Exception as e:
-                logger.error(f"❌ Error adding column {column_name}: {e}")
+            self._widen_feedback_id_column(conn, "Feedback")
 
-        # Update ISV/Platform to Developer in existing data
-        try:
             cursor.execute("UPDATE Feedback SET Audience = 'Developer' WHERE Audience IN ('ISV', 'Platform')")
             updated_rows = cursor.rowcount
+            conn.commit()
             if updated_rows > 0:
-                conn.commit()
-                logger.info(f"✅ Updated {updated_rows} rows: ISV/Platform → Developer")
-        except Exception as e:
-            logger.error(f"❌ Error updating audience values: {e}")
+                logger.info("Updated %s legacy audience values", updated_rows)
+        except Exception:
+            conn.rollback()
+            logger.exception("Unable to migrate Feedback")
+            raise
 
-        logger.info("🔄 Feedback table migration completed")
+        logger.info("Feedback table migration completed")
+
+    @staticmethod
+    def _quote_identifier(identifier: str) -> str:
+        return "[" + identifier.replace("]", "]]") + "]"
+
+    def _widen_feedback_id_column(self, conn, table_name: str) -> None:
+        """Widen an indexed Feedback_ID without losing its key constraints."""
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT CHARACTER_MAXIMUM_LENGTH
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = 'dbo'
+              AND TABLE_NAME = ?
+              AND COLUMN_NAME = 'Feedback_ID'
+            """,
+            [table_name],
+        )
+        id_column = cursor.fetchone()
+        if (
+            not id_column
+            or id_column[0] is None
+            or int(id_column[0]) <= 0
+            or id_column[0] >= 200
+        ):
+            return
+
+        cursor.execute(
+            """
+            SELECT
+                kc.name,
+                kc.type,
+                i.type_desc,
+                COUNT(ic.key_ordinal) AS key_column_count
+            FROM sys.key_constraints kc
+            INNER JOIN sys.tables t
+                ON t.object_id = kc.parent_object_id
+            INNER JOIN sys.schemas s
+                ON s.schema_id = t.schema_id
+            INNER JOIN sys.indexes i
+                ON i.object_id = kc.parent_object_id
+               AND i.index_id = kc.unique_index_id
+            INNER JOIN sys.index_columns ic
+                ON ic.object_id = i.object_id
+               AND ic.index_id = i.index_id
+               AND ic.key_ordinal > 0
+            INNER JOIN sys.columns c
+                ON c.object_id = ic.object_id
+               AND c.column_id = ic.column_id
+            WHERE s.name = 'dbo'
+              AND t.name = ?
+            GROUP BY kc.name, kc.type, i.type_desc
+            HAVING SUM(
+                CASE WHEN c.name = 'Feedback_ID' THEN 1 ELSE 0 END
+            ) > 0
+            ORDER BY kc.name
+            """,
+            [table_name],
+        )
+        constraints = cursor.fetchall()
+        if any(int(row[3]) != 1 for row in constraints):
+            raise RuntimeError(
+                f"Cannot automatically widen composite key constraints on "
+                f"dbo.{table_name}.Feedback_ID"
+            )
+
+        cursor.execute(
+            """
+            SELECT DISTINCT i.name
+            FROM sys.indexes i
+            INNER JOIN sys.tables t
+                ON t.object_id = i.object_id
+            INNER JOIN sys.schemas s
+                ON s.schema_id = t.schema_id
+            INNER JOIN sys.index_columns ic
+                ON ic.object_id = i.object_id
+               AND ic.index_id = i.index_id
+            INNER JOIN sys.columns c
+                ON c.object_id = ic.object_id
+               AND c.column_id = ic.column_id
+            WHERE s.name = 'dbo'
+              AND t.name = ?
+              AND c.name = 'Feedback_ID'
+              AND i.is_primary_key = 0
+              AND i.is_unique_constraint = 0
+              AND i.name IS NOT NULL
+            """,
+            [table_name],
+        )
+        dependent_indexes = [str(row[0]) for row in cursor.fetchall()]
+        if dependent_indexes:
+            raise RuntimeError(
+                f"Cannot automatically widen dbo.{table_name}.Feedback_ID "
+                "while custom indexes depend on it: "
+                + ", ".join(dependent_indexes)
+            )
+
+        qualified_table = (
+            f"{self._quote_identifier('dbo')}."
+            f"{self._quote_identifier(table_name)}"
+        )
+        for constraint_name, _kind, _index_type, _count in constraints:
+            cursor.execute(
+                f"ALTER TABLE {qualified_table} DROP CONSTRAINT "
+                f"{self._quote_identifier(str(constraint_name))}"
+            )
+
+        cursor.execute(
+            f"ALTER TABLE {qualified_table} ALTER COLUMN "
+            f"{self._quote_identifier('Feedback_ID')} NVARCHAR(200) NOT NULL"
+        )
+
+        for constraint_name, kind, index_type, _count in constraints:
+            constraint_type = "PRIMARY KEY" if kind == "PK" else "UNIQUE"
+            storage = (
+                "CLUSTERED"
+                if str(index_type).upper() == "CLUSTERED"
+                else "NONCLUSTERED"
+            )
+            cursor.execute(
+                f"ALTER TABLE {qualified_table} ADD CONSTRAINT "
+                f"{self._quote_identifier(str(constraint_name))} "
+                f"{constraint_type} {storage} "
+                f"({self._quote_identifier('Feedback_ID')})"
+            )
 
     def load_feedback_states(self):
         """Load state data from FeedbackState table for server-side filtering"""
         conn = None
         try:
-            # Connect to database using same pattern as other methods
-            conn = None
-            if self.bearer_token:
-                try:
-                    conn = self.connect_with_token(self.bearer_token)
-                except Exception as token_error:
-                    logger.warning(f"Bearer token authentication failed: {token_error}")
-                    logger.info("Falling back to interactive authentication...")
-                    conn = self.connect_interactive()
-            else:
-                conn = self.connect_interactive()
+            conn = self._connect()
 
             if not conn:
-                logger.error("❌ Cannot load feedback states - no database connection")
-                return {}
+                raise ConnectionError("Could not connect to Fabric SQL")
 
             cursor = conn.cursor()
 
-            # Query to get all state data with correct column names
-            # Use COALESCE to fallback to Feedback.Primary_Domain if FeedbackState.Primary_Domain is NULL
+            # Return only explicit state overrides. Falling back to the Feedback
+            # table here would turn automatic categorization into a stale override.
             query = """
                 SELECT
                     fs.Feedback_ID,
                     fs.State,
-                    COALESCE(fs.Primary_Domain, f.Primary_Domain) as Primary_Domain,
+                    fs.Primary_Domain,
                     fs.Feedback_Notes,
                     fs.Last_Updated,
-                    fs.Updated_By
+                    fs.Updated_By,
+                    CASE
+                        WHEN fs.Primary_Domain IS NOT NULL THEN 1
+                        ELSE COALESCE(f.User_Modified_Categorization, 0)
+                    END AS User_Modified_Categorization
                 FROM FeedbackState fs
                 LEFT JOIN Feedback f ON fs.Feedback_ID = f.Feedback_ID
                 ORDER BY fs.Last_Updated DESC
@@ -397,6 +531,7 @@ class FabricSQLWriter:
                     "notes": row[3],
                     "last_updated": row[4].isoformat() if row[4] else None,
                     "updated_by": row[5],
+                    "user_modified_categorization": bool(row[6]),
                 }
 
             cursor.close()
@@ -404,297 +539,409 @@ class FabricSQLWriter:
             logger.info(f"📊 Loaded {len(state_data)} state records from FeedbackState table")
             return state_data
 
-        except Exception as e:
-            logger.error(f"❌ Error loading feedback states: {e}")
-            return {}
+        except Exception:
+            logger.exception("Error loading feedback states")
+            raise
         finally:
             if conn:
                 conn.close()
 
-    def write_feedback_bulk(self, feedback_data: List[Dict[str, Any]], use_token: bool = True) -> Dict[str, int]:
-        """
-        Bulletproof bulk write with deterministic IDs and true duplicate prevention
-
-        Args:
-            feedback_data: List of feedback dictionaries from cache
-            use_token: Whether to use bearer token (True) or interactive auth (False)
-
-        Returns:
-            dict: {'new_items': X, 'existing_items': Y, 'total_items': Z, 'id_regenerated': W}
-        """
-        if not feedback_data:
-            logger.info("No feedback data to write")
-            return {"new_items": 0, "existing_items": 0, "total_items": 0, "id_regenerated": 0}
-
+    def get_stored_feedback_ids(self) -> List[str]:
+        """Return the non-empty feedback IDs stored in Fabric."""
+        conn = None
         try:
-            # Import deterministic ID generator
-            from id_generator import FeedbackIDGenerator
-
-            logger.info(f"🔄 Bulletproof sync: Processing {len(feedback_data)} feedback items")
-
-            # Connect to database
-            conn = None
-            if use_token and self.bearer_token:
-                try:
-                    conn = self.connect_with_token(self.bearer_token)
-                except Exception as token_error:
-                    logger.warning(f"Bearer token authentication failed: {token_error}")
-                    logger.info("Falling back to interactive authentication...")
-                    conn = self.connect_interactive()
-            else:
-                conn = self.connect_interactive()
-
-            # Get current user for proper attribution
-            current_user = self.get_current_user(conn)
-
-            # Ensure table exists
-            self.ensure_feedback_table(conn)
-
+            conn = self._connect()
             cursor = conn.cursor()
-
-            # Get ALL existing feedback (ID, Title, Content hash) for comprehensive duplicate checking
-            # Optimize fetch: Only get what's needed for the hash (first 200 chars of content)
             cursor.execute(
                 """
-                SELECT Feedback_ID, Title, CAST(LEFT(CAST(Content AS NVARCHAR(MAX)), 200) AS NVARCHAR(200))
+                SELECT DISTINCT Feedback_ID
                 FROM Feedback
-            """
+                WHERE Feedback_ID IS NOT NULL AND Feedback_ID != ''
+                """
+            )
+            return [str(row[0]) for row in cursor.fetchall() if row[0]]
+        except Exception:
+            logger.exception("Error loading stored feedback IDs")
+            raise
+        finally:
+            if conn:
+                conn.close()
+
+    @staticmethod
+    def _text_value(value: Any, max_length: Optional[int] = None) -> str:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return ""
+        if isinstance(value, (dict, list, tuple)):
+            text = json.dumps(value, default=str, ensure_ascii=False)
+        else:
+            text = str(value)
+        return text[:max_length] if max_length is not None else text
+
+    @classmethod
+    def _bounded_text_value(
+        cls,
+        value: Any,
+        max_length: int,
+        field_name: str,
+    ) -> str:
+        text = cls._text_value(value)
+        if len(text) > max_length:
+            raise ValueError(
+                f"{field_name} exceeds the Fabric limit of "
+                f"{max_length} characters"
+            )
+        return text
+
+    @staticmethod
+    def _date_value(value: Any) -> Optional[datetime]:
+        if not value or (isinstance(value, float) and pd.isna(value)):
+            return None
+        if isinstance(value, datetime):
+            parsed = value
+        if isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        elif not isinstance(value, datetime):
+            return None
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+
+    @classmethod
+    def _prepare_feedback_row(
+        cls,
+        feedback: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        matched_keywords = feedback.get("Matched_Keywords", [])
+        if isinstance(matched_keywords, str):
+            try:
+                json.loads(matched_keywords)
+                matched_keywords_json = matched_keywords
+            except (TypeError, ValueError):
+                matched_keywords_json = json.dumps([matched_keywords])
+        elif isinstance(matched_keywords, (list, tuple)):
+            matched_keywords_json = json.dumps(
+                list(matched_keywords),
+                default=str,
+                ensure_ascii=False,
+            )
+        else:
+            matched_keywords_json = "[]"
+
+        domains = feedback.get("Domains", [])
+        if isinstance(domains, str):
+            try:
+                json.loads(domains)
+                domains_json = domains
+            except (TypeError, ValueError):
+                domains_json = json.dumps([domains])
+        else:
+            domains_json = json.dumps(
+                domains or [],
+                default=str,
+                ensure_ascii=False,
             )
 
-            existing_items_db = {}
-            existing_content_hashes = set()
+        audience = cls._text_value(feedback.get("Audience"))
+        if audience in {"ISV", "Platform"}:
+            audience = "Developer"
+        elif audience not in {"Developer", "Customer"}:
+            audience = "Customer"
 
-            for row in cursor.fetchall():
-                existing_items_db[row[0]] = {"title": row[1], "content": row[2]}
-                # Create content signature for duplicate detection - handle float/NaN values
-                title_safe = (
-                    str(row[1]) if row[1] is not None and not (isinstance(row[1], float) and pd.isna(row[1])) else ""
-                )
-                content_safe = (
-                    str(row[2]) if row[2] is not None and not (isinstance(row[2], float) and pd.isna(row[2])) else ""
-                )
-                content_sig = f"{title_safe.lower().strip()}|{content_safe[:200].lower().strip()}"
-                existing_content_hashes.add(content_sig)
+        confidence = feedback.get("Categorization_Confidence")
+        try:
+            confidence = float(confidence) if confidence not in (None, "") else None
+        except (TypeError, ValueError):
+            confidence = None
+        if confidence is not None and not math.isfinite(confidence):
+            confidence = None
 
-            logger.info(f"📊 Found {len(existing_items_db)} existing items in database")
+        sentiment_score = feedback.get("Sentiment_Score")
+        try:
+            sentiment_score = (
+                float(sentiment_score)
+                if sentiment_score not in (None, "")
+                else None
+            )
+        except (TypeError, ValueError):
+            sentiment_score = None
+        if sentiment_score is not None and not math.isfinite(sentiment_score):
+            sentiment_score = None
 
-            # Process each feedback item
+        return {
+            "Title": cls._text_value(
+                feedback.get("Title")
+                or feedback.get("Feedback_Gist")
+                or feedback.get("Feedback"),
+                500,
+            ),
+            "Content": cls._text_value(
+                feedback.get("Content") or feedback.get("Feedback")
+            ),
+            "Source": cls._text_value(
+                feedback.get("Source") or feedback.get("Sources"),
+                50,
+            ),
+            "Source_URL": cls._text_value(
+                feedback.get("Source_URL") or feedback.get("Url"),
+                1000,
+            ),
+            "Author": cls._text_value(
+                feedback.get("Author") or feedback.get("Customer"),
+                100,
+            ),
+            "Created_Date": cls._date_value(
+                feedback.get("Created_Date") or feedback.get("Created")
+            ),
+            "Sentiment": cls._text_value(feedback.get("Sentiment"), 20),
+            "Sentiment_Score": sentiment_score,
+            "Sentiment_Confidence": cls._text_value(
+                feedback.get("Sentiment_Confidence"),
+                20,
+            ),
+            "Primary_Category": cls._bounded_text_value(
+                feedback.get("Primary_Category") or feedback.get("Category"),
+                100,
+                "Primary_Category",
+            ),
+            "Enhanced_Category": cls._bounded_text_value(
+                feedback.get("Enhanced_Category"),
+                200,
+                "Enhanced_Category",
+            ),
+            "Audience": cls._bounded_text_value(
+                audience,
+                50,
+                "Audience",
+            ),
+            "Priority": cls._bounded_text_value(
+                feedback.get("Priority"),
+                20,
+                "Priority",
+            ),
+            "Feedback_Gist": cls._text_value(
+                feedback.get("Feedback_Gist"),
+                1000,
+            ),
+            "Area": cls._text_value(feedback.get("Area"), 100),
+            "Impacttype": cls._bounded_text_value(
+                feedback.get("Impacttype"),
+                100,
+                "Impacttype",
+            ),
+            "Scenario": cls._text_value(feedback.get("Scenario"), 50),
+            "Tag": cls._text_value(feedback.get("Tag"), 200),
+            "Organization": cls._text_value(
+                feedback.get("Organization"),
+                200,
+            ),
+            "Status": cls._text_value(feedback.get("Status"), 50),
+            "Created_by": cls._text_value(feedback.get("Created_by"), 100),
+            "Rawfeedback": cls._text_value(feedback.get("Rawfeedback")),
+            "Category": cls._bounded_text_value(
+                feedback.get("Category"),
+                100,
+                "Category",
+            ),
+            "Subcategory": cls._bounded_text_value(
+                feedback.get("Subcategory"),
+                200,
+                "Subcategory",
+            ),
+            "Feature_Area": cls._bounded_text_value(
+                feedback.get("Feature_Area"),
+                200,
+                "Feature_Area",
+            ),
+            "Categorization_Confidence": confidence,
+            "Primary_Domain": cls._bounded_text_value(
+                feedback.get("Primary_Domain"),
+                100,
+                "Primary_Domain",
+            ),
+            "Domains": domains_json,
+            "Matched_Keywords": matched_keywords_json,
+            "Auto_Recategorized_Date": cls._date_value(
+                feedback.get("Auto_Recategorized_Date")
+            ),
+            "User_Modified_Categorization": int(
+                bool(feedback.get("User_Modified_Categorization"))
+            ),
+        }
+
+    def write_feedback_bulk(
+        self,
+        feedback_data: List[Dict[str, Any]],
+        use_token: bool = True,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        cancellation_requested: Optional[Callable[[], bool]] = None,
+    ) -> Dict[str, int]:
+        """Synchronize SQLite feedback rows into Fabric by canonical ID."""
+        if not feedback_data:
+            logger.info("No feedback data to write")
+            return {
+                "new_items": 0,
+                "existing_items": 0,
+                "total_items": 0,
+                "id_regenerated": 0,
+                "id_generated": 0,
+            }
+        if not use_token:
+            raise ValueError("Interactive Fabric authentication is not supported")
+
+        conn = None
+        try:
+            from id_generator import FeedbackIDGenerator
+
+            logger.info("Synchronizing %s feedback items to Fabric", len(feedback_data))
+            conn = self._connect()
+            self.get_current_user(conn)
+            self.ensure_feedback_table(conn)
+            self.ensure_feedback_state_table(conn)
+            cursor = conn.cursor()
+            cursor.execute("SELECT Feedback_ID FROM Feedback")
+            existing_ids = {str(row[0]) for row in cursor.fetchall() if row[0]}
+
             new_items = 0
             existing_items = 0
-            id_regenerated = 0
+            id_generated = 0
+            insert_columns = (
+                "Feedback_ID",
+                *_FABRIC_ALWAYS_SYNC_COLUMNS,
+                *_FABRIC_CATEGORY_COLUMNS,
+                "User_Modified_Categorization",
+            )
+            new_items_params: List[List[Any]] = []
+            total_items = len(feedback_data)
 
-            # Collect new items for bulk insert
-            new_items_params = []
-
-            for feedback in feedback_data:
+            for index, feedback in enumerate(feedback_data, start=1):
+                if cancellation_requested and cancellation_requested():
+                    raise FabricWriteCancelled("Fabric write cancelled")
                 try:
-                    # Generate deterministic ID based on content
-                    deterministic_id = FeedbackIDGenerator.generate_id_from_feedback_dict(feedback)
-                    original_id = feedback.get("Feedback_ID") or feedback.get("id", "")
-
-                    if deterministic_id != original_id:
-                        id_regenerated += 1
-                        logger.info(f"🔄 ID regenerated: {original_id} → {deterministic_id}")
-
-                    # Update feedback with deterministic ID
-                    feedback["Feedback_ID"] = deterministic_id
-
-                    # Check for duplicates by ID - UPDATE if exists to add keywords
-                    if deterministic_id in existing_items_db:
-                        existing_items += 1
-                        logger.debug(f"✅ Item already exists by ID: {deterministic_id} - checking for keyword updates")
-
-                        # Extract and serialize keywords for update
-                        matched_keywords_raw = feedback.get("Matched_Keywords", [])
-                        if isinstance(matched_keywords_raw, list):
-                            matched_keywords = json.dumps(matched_keywords_raw)
-                        elif isinstance(matched_keywords_raw, str):
-                            matched_keywords = matched_keywords_raw
-                        else:
-                            matched_keywords = "[]"
-
-                        # Update existing record with keywords if they're not empty
-                        if matched_keywords and matched_keywords != "[]":
-                            try:
-                                cursor.execute(
-                                    """
-                                    UPDATE Feedback
-                                    SET Matched_Keywords = ?
-                                    WHERE Feedback_ID = ?
-                                    AND (Matched_Keywords IS NULL OR DATALENGTH(Matched_Keywords) = 0)
-                                """,
-                                    [matched_keywords, deterministic_id],
-                                )
-                                if cursor.rowcount > 0:
-                                    logger.info(f"🔄 Updated keywords for existing item: {deterministic_id}")
-                            except Exception as update_error:
-                                logger.warning(f"⚠️ Could not update keywords for {deterministic_id}: {update_error}")
-
-                        continue
-
-                    # Check for duplicates by content using proper field mapping - handle float/NaN values
-                    title_raw = feedback.get("Title") or feedback.get("Feedback_Gist") or feedback.get("Feedback", "")
-                    content_raw = feedback.get("Content") or feedback.get("Feedback") or ""
-
-                    # Safely handle potential float/NaN values
-                    title = (
-                        str(title_raw)[:100]
-                        if title_raw is not None and not (isinstance(title_raw, float) and pd.isna(title_raw))
-                        else ""
-                    )
-                    content = (
-                        str(content_raw)
-                        if content_raw is not None and not (isinstance(content_raw, float) and pd.isna(content_raw))
-                        else ""
-                    )
-
-                    content_sig = f"{title.lower().strip()}|{content[:200].lower().strip()}"
-
-                    if content_sig in existing_content_hashes:
-                        existing_items += 1
-                        logger.debug(f"✅ Item already exists by content: {title[:50]}...")
-                        continue
-
-                    # Extract all fields for new item with proper field mapping
-                    source = feedback.get("Source") or feedback.get("Sources", "")
-                    source_url = feedback.get("Source_URL") or feedback.get("Url", "")
-                    author = feedback.get("Author") or feedback.get("Customer", "")
-                    created_date = feedback.get("Created_Date") or feedback.get("Created")
-                    sentiment = feedback.get("Sentiment", "")
-                    primary_category = feedback.get("Primary_Category") or feedback.get("Category", "")
-                    enhanced_category = feedback.get("Enhanced_Category", "")
-                    audience = feedback.get("Audience", "")
-                    priority = feedback.get("Priority", "")
-
-                    # New fields from collectors
-                    feedback_gist = feedback.get("Feedback_Gist", "")
-                    area = feedback.get("Area", "")
-                    impacttype = feedback.get("Impacttype", "")
-                    scenario = feedback.get("Scenario", "")
-                    tag = feedback.get("Tag", "")
-                    organization = feedback.get("Organization", "")
-                    status = feedback.get("Status", "")
-                    created_by = feedback.get("Created_by", "")
-                    rawfeedback = feedback.get("Rawfeedback", "")
-                    category = feedback.get("Category", "")
-                    subcategory = feedback.get("Subcategory", "")
-                    feature_area = feedback.get("Feature_Area", "")
-                    categorization_confidence = feedback.get("Categorization_Confidence", 0.0)
-                    primary_domain = feedback.get("Primary_Domain", "")
-                    domains = str(feedback.get("Domains", [])) if feedback.get("Domains") else ""
-
-                    # Serialize Matched_Keywords as JSON string
-                    matched_keywords_raw = feedback.get("Matched_Keywords", [])
-                    if isinstance(matched_keywords_raw, list):
-                        matched_keywords = json.dumps(matched_keywords_raw)
-                    elif isinstance(matched_keywords_raw, str):
-                        matched_keywords = matched_keywords_raw  # Already JSON string
+                    feedback_id = feedback.get("Feedback_ID") or feedback.get("id")
+                    if feedback_id:
+                        feedback_id = str(feedback_id).strip()
                     else:
-                        matched_keywords = "[]"
+                        feedback_id = (
+                            FeedbackIDGenerator.generate_id_from_feedback_dict(
+                                feedback
+                            )
+                        )
+                        id_generated += 1
+                    if not feedback_id or len(feedback_id) > 200:
+                        raise ValueError(
+                            "Feedback_ID must contain between 1 and 200 characters"
+                        )
 
-                    # Map ISV/Platform to Developer for audience standardization
-                    if audience in ["ISV", "Platform"]:
-                        audience = "Developer"
-                    elif audience not in ["Developer", "Customer"]:
-                        audience = "Customer"  # Default fallback
+                    prepared = self._prepare_feedback_row(feedback)
+                    incoming_user_modified = prepared[
+                        "User_Modified_Categorization"
+                    ]
 
-                    # Convert date if needed
-                    if isinstance(created_date, str):
-                        try:
-                            from datetime import datetime
-
-                            created_date = datetime.fromisoformat(created_date.replace("Z", "+00:00"))
-                        except (ValueError, AttributeError):
-                            created_date = None
-
-                    # Add to batch params
-                    new_items_params.append(
-                        [
-                            deterministic_id,
-                            title,
-                            content,
-                            source,
-                            source_url,
-                            author,
-                            created_date,
-                            sentiment,
-                            primary_category,
-                            enhanced_category,
-                            audience,
-                            priority,
-                            feedback_gist,
-                            area,
-                            impacttype,
-                            scenario,
-                            tag,
-                            organization,
-                            status,
-                            created_by,
-                            rawfeedback,
-                            category,
-                            subcategory,
-                            feature_area,
-                            categorization_confidence,
-                            primary_domain,
-                            domains,
-                            matched_keywords,
+                    if feedback_id in existing_ids:
+                        existing_items += 1
+                        assignments = [
+                            f"{column} = ?"
+                            for column in _FABRIC_ALWAYS_SYNC_COLUMNS
                         ]
-                    )
-
-                    # Add to existing sets to prevent duplicates within this batch
-                    existing_items_db[deterministic_id] = {"title": title, "content": content}
-                    existing_content_hashes.add(content_sig)
-
-                    new_items += 1
-                    logger.debug(f"📝 Added new item to batch: {deterministic_id}")
-
-                except Exception as e:
-                    logger.error(f"❌ Error processing feedback: {e}")
-                    continue
+                        params = [
+                            prepared[column]
+                            for column in _FABRIC_ALWAYS_SYNC_COLUMNS
+                        ]
+                        for column in _FABRIC_CATEGORY_COLUMNS:
+                            assignments.append(
+                                f"{column} = CASE "
+                                "WHEN ? = 1 OR "
+                                "COALESCE(User_Modified_Categorization, 0) = 0 "
+                                f"THEN ? ELSE {column} END"
+                            )
+                            params.extend(
+                                [
+                                    incoming_user_modified,
+                                    prepared[column],
+                                ]
+                            )
+                        assignments.extend(
+                            [
+                                "User_Modified_Categorization = CASE "
+                                "WHEN ? = 1 THEN 1 "
+                                "ELSE COALESCE(User_Modified_Categorization, 0) END",
+                                "Collected_Date = GETDATE()",
+                            ]
+                        )
+                        params.extend([incoming_user_modified, feedback_id])
+                        cursor.execute(
+                            "UPDATE Feedback SET "
+                            + ", ".join(assignments)
+                            + " WHERE Feedback_ID = ?",
+                            params,
+                        )
+                    else:
+                        new_items_params.append(
+                            [
+                                feedback_id,
+                                *[
+                                    prepared[column]
+                                    for column in _FABRIC_ALWAYS_SYNC_COLUMNS
+                                ],
+                                *[
+                                    prepared[column]
+                                    for column in _FABRIC_CATEGORY_COLUMNS
+                                ],
+                                incoming_user_modified,
+                            ]
+                        )
+                        existing_ids.add(feedback_id)
+                        new_items += 1
+                except Exception:
+                    logger.exception("Error processing feedback item %s", index)
+                    raise
+                finally:
+                    if progress_callback:
+                        progress_callback(index, total_items)
 
             # Execute bulk insert if there are new items
+            if cancellation_requested and cancellation_requested():
+                raise FabricWriteCancelled("Fabric write cancelled")
             if new_items_params:
-                logger.info(f"🚀 Executing bulk insert for {len(new_items_params)} items...")
+                placeholders = ", ".join("?" for _ in insert_columns)
                 cursor.executemany(
-                    """
-                    INSERT INTO Feedback (
-                        Feedback_ID, Title, Content, Source, Source_URL, Author,
-                        Created_Date, Sentiment, Primary_Category, Enhanced_Category,
-                        Audience, Priority, Feedback_Gist, Area, Impacttype, Scenario,
-                        Tag, Organization, Status, Created_by, Rawfeedback, Category,
-                        Subcategory, Feature_Area, Categorization_Confidence, Primary_Domain, Domains, Matched_Keywords
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
+                    f"INSERT INTO Feedback ({', '.join(insert_columns)}) "
+                    f"VALUES ({placeholders})",
                     new_items_params,
                 )
-                logger.info("✅ Bulk insert completed")
+
+            if cancellation_requested and cancellation_requested():
+                raise FabricWriteCancelled("Fabric write cancelled")
 
             conn.commit()
-
-            # Sync domain updates from FeedbackState to Feedback table
-            # This ensures that domain updates are not lost when the table is recreated
-            if new_items > 0:
-                logger.info("🔄 Syncing domain updates from FeedbackState to Feedback table...")
-                synced_domains = self.sync_domains_from_state_to_feedback(conn)
-                if synced_domains > 0:
-                    conn.commit()
-                    logger.info(f"✅ Domain sync complete: {synced_domains} records updated in Feedback table")
 
             result = {
                 "new_items": new_items,
                 "existing_items": existing_items,
-                "total_items": len(feedback_data),
-                "id_regenerated": id_regenerated,
+                "total_items": total_items,
+                "id_regenerated": id_generated,
+                "id_generated": id_generated,
             }
-
             logger.info(
-                f"✅ Bulletproof sync complete: {new_items} new, {existing_items} existing, {id_regenerated} IDs regenerated"
+                "Fabric sync complete: %s new, %s updated, %s IDs generated",
+                new_items,
+                existing_items,
+                id_generated,
             )
             return result
 
-        except Exception as e:
-            logger.error(f"❌ Error in bulletproof sync: {e}")
-            return {"new_items": 0, "existing_items": 0, "total_items": len(feedback_data), "id_regenerated": 0}
+        except FabricWriteCancelled:
+            if conn:
+                conn.rollback()
+            raise
+        except Exception:
+            if conn:
+                conn.rollback()
+            logger.exception("Error in Fabric feedback sync")
+            raise
         finally:
             if conn:
                 conn.close()
@@ -710,12 +957,17 @@ class FabricSQLWriter:
             # Update Feedback table with domain values from FeedbackState where they exist
             update_query = """
             UPDATE f
-            SET f.Primary_Domain = fs.Primary_Domain
+            SET f.Primary_Domain = fs.Primary_Domain,
+                f.User_Modified_Categorization = 1
             FROM Feedback f
             INNER JOIN FeedbackState fs ON f.Feedback_ID = fs.Feedback_ID
             WHERE fs.Primary_Domain IS NOT NULL
             AND fs.Primary_Domain != ''
-            AND (f.Primary_Domain IS NULL OR f.Primary_Domain != fs.Primary_Domain)
+            AND (
+                f.Primary_Domain IS NULL
+                OR f.Primary_Domain != fs.Primary_Domain
+                OR COALESCE(f.User_Modified_Categorization, 0) = 0
+            )
             """
 
             cursor.execute(update_query)
@@ -729,36 +981,28 @@ class FabricSQLWriter:
             cursor.close()
             return updated_rows
 
-        except Exception as e:
-            logger.error(f"❌ Error syncing domains from state to feedback: {e}")
-            return 0
+        except Exception:
+            logger.exception("Error syncing domains from state to feedback")
+            raise
 
     def sync_domains_from_state(self, use_token: bool = True) -> int:
         """
         Manually sync domain updates from FeedbackState to Feedback table
 
         Args:
-            use_token: Whether to use bearer token (True) or interactive auth (False)
+            use_token: Must be True. Interactive authentication is unsupported.
 
         Returns:
             int: Number of records updated
         """
-        try:
-            # Connect to database
-            conn = None
-            if use_token and self.bearer_token:
-                try:
-                    conn = self.connect_with_token(self.bearer_token)
-                except Exception as token_error:
-                    logger.warning(f"Bearer token authentication failed: {token_error}")
-                    logger.info("Falling back to interactive authentication...")
-                    conn = self.connect_interactive()
-            else:
-                conn = self.connect_interactive()
+        if not use_token:
+            raise ValueError("Interactive Fabric authentication is not supported")
 
+        conn = None
+        try:
+            conn = self._connect()
             if not conn:
-                logger.error("❌ Cannot sync domains - no database connection")
-                return 0
+                raise ConnectionError("Could not connect to Fabric SQL")
 
             # Ensure both tables exist
             self.ensure_feedback_table(conn)
@@ -773,42 +1017,51 @@ class FabricSQLWriter:
 
             return updated_count
 
-        except Exception as e:
-            logger.error(f"❌ Error in domain sync: {e}")
-            return 0
+        except Exception:
+            logger.exception("Error syncing Fabric domains")
+            raise
         finally:
             if conn:
                 conn.close()
 
-    def update_feedback_states(self, state_changes: List[Dict[str, Any]], use_token: bool = True) -> bool:
+    def update_feedback_states(self, state_changes: List[Dict[str, Any]]) -> bool:
         """
         Update feedback states in Fabric SQL database
 
         Args:
             state_changes: List of state change dictionaries
-            use_token: Whether to use bearer token (True) or interactive auth (False)
-
         Returns:
-            bool: True if successful, False otherwise
+            bool: True when all changes commit successfully
         """
         if not state_changes:
             logger.info("No state changes to update")
             return True
 
+        if not self.bearer_token:
+            raise ValueError("A Fabric bearer token is required")
+
+        normalized_changes = []
+        for index, change in enumerate(state_changes):
+            if not isinstance(change, dict):
+                raise ValueError(f"State change {index} must be an object")
+            feedback_id = change.get("feedback_id")
+            if (
+                not isinstance(feedback_id, str)
+                or not feedback_id.strip()
+                or len(feedback_id) > 200
+            ):
+                raise ValueError(
+                    f"State change {index} has an invalid feedback_id"
+                )
+            normalized_changes.append(
+                {**change, "feedback_id": feedback_id.strip()}
+            )
+        state_changes = normalized_changes
+
+        conn = None
         try:
             logger.info(f"Updating {len(state_changes)} feedback states in Fabric SQL database")
-
-            # Try bearer token first, then fallback to interactive
-            conn = None
-            if use_token and self.bearer_token:
-                try:
-                    conn = self.connect_with_token(self.bearer_token)
-                except Exception as token_error:
-                    logger.warning(f"Bearer token authentication failed: {token_error}")
-                    logger.info("Falling back to interactive authentication...")
-                    conn = self.connect_interactive()
-            else:
-                conn = self.connect_interactive()
+            conn = self.connect_with_token(self.bearer_token)
 
             # Ensure table exists
             self.ensure_feedback_state_table(conn)
@@ -818,10 +1071,7 @@ class FabricSQLWriter:
             # Process each state change
             updated_count = 0
             for change in state_changes:
-                feedback_id = change.get("feedback_id")
-                if not feedback_id:
-                    logger.warning(f"Skipping change without feedback_id: {change}")
-                    continue
+                feedback_id = change["feedback_id"]
 
                 logger.info(f"Processing state change for feedback_id: {feedback_id}")
 
@@ -874,16 +1124,18 @@ class FabricSQLWriter:
 
                     logger.info(f"Inserted new record for feedback_id: {feedback_id}")
 
-                # Also update Primary_Domain in Feedback table if present to keep them in sync
-                if change.get("domain"):
-                    try:
-                        cursor.execute(
-                            "UPDATE Feedback SET Primary_Domain = ? WHERE Feedback_ID = ?",
-                            [change.get("domain"), feedback_id],
-                        )
-                        logger.info(f"Synced Primary_Domain to Feedback table for feedback_id: {feedback_id}")
-                    except Exception as e:
-                        logger.warning(f"Failed to sync Primary_Domain to Feedback table: {e}")
+                # Keep the denormalized domain in the Feedback table synchronized.
+                if "domain" in change and change.get("domain") is not None:
+                    cursor.execute(
+                        """
+                        UPDATE Feedback
+                        SET Primary_Domain = ?,
+                            User_Modified_Categorization = 1
+                        WHERE Feedback_ID = ?
+                        """,
+                        [change.get("domain"), feedback_id],
+                    )
+                    logger.info(f"Synced Primary_Domain to Feedback table for feedback_id: {feedback_id}")
 
                 updated_count += 1
 
@@ -893,22 +1145,22 @@ class FabricSQLWriter:
             logger.info(f"Successfully updated {updated_count} feedback states in Fabric SQL database")
             return True
 
-        except Exception as e:
-            logger.error(f"Error updating feedback states in Fabric SQL database: {e}")
-            return False
+        except Exception:
+            if conn:
+                conn.rollback()
+            logger.exception("Error updating feedback states in Fabric SQL database")
+            raise
         finally:
             if conn:
                 conn.close()
 
     def get_feedback_state(self, feedback_id: str, use_token: bool = True) -> Dict[str, Any]:
         """Get current state of a feedback item from SQL database"""
+        if not use_token:
+            raise ValueError("Interactive Fabric authentication is not supported")
         conn = None
         try:
-            # Connect to database
-            if use_token and self.bearer_token:
-                conn = self.connect_with_token(self.bearer_token)
-            else:
-                conn = self.connect_interactive()
+            conn = self._connect()
 
             cursor = conn.cursor()
 
@@ -935,139 +1187,18 @@ class FabricSQLWriter:
             else:
                 return None
 
-        except Exception as e:
-            logger.error(f"Error getting feedback state from SQL database: {e}")
-            return None
+        except Exception:
+            logger.exception("Error getting feedback state from SQL database")
+            raise
         finally:
             if conn:
                 conn.close()
 
     def recategorize_all_feedback(self, use_token: bool = True) -> Dict[str, int]:
-        """
-        Recategorize all feedback items using current category and impact type configurations.
-        Only recategorizes items that have not been manually modified by users.
-
-        Args:
-            use_token: Whether to use bearer token (True) or interactive auth (False)
-
-        Returns:
-            dict: {'recategorized': X, 'skipped_user_modified': Y, 'total_processed': Z}
-        """
-        try:
-            from utils import enhanced_categorize_feedback
-            from datetime import datetime
-
-            logger.info("🔄 Starting automatic recategorization of all feedback...")
-
-            # Connect to database
-            conn = None
-            if use_token and self.bearer_token:
-                try:
-                    conn = self.connect_with_token(self.bearer_token)
-                except Exception as token_error:
-                    logger.warning(f"Bearer token authentication failed: {token_error}")
-                    logger.info("Falling back to interactive authentication...")
-                    conn = self.connect_interactive()
-            else:
-                conn = self.connect_interactive()
-
-            if not conn:
-                logger.error("Failed to connect to database for recategorization")
-                return {"recategorized": 0, "skipped_user_modified": 0, "total_processed": 0}
-
-            cursor = conn.cursor()
-
-            # Get all feedback that hasn't been manually modified
-            cursor.execute(
-                """
-                SELECT Feedback_ID, Content, Source, Scenario, Organization,
-                       User_Modified_Categorization
-                FROM Feedback
-            """
-            )
-
-            feedback_items = cursor.fetchall()
-            total_items = len(feedback_items)
-            recategorized_count = 0
-            skipped_count = 0
-
-            logger.info(f"📊 Found {total_items} feedback items to process")
-
-            for row in feedback_items:
-                try:
-                    feedback_id = row[0]
-                    content = row[1] or ""
-                    source = row[2] or ""
-                    scenario = row[3] or ""
-                    organization = row[4] or ""
-                    user_modified = row[5] if len(row) > 5 else False
-
-                    # Skip if user has manually modified categorization
-                    if user_modified:
-                        skipped_count += 1
-                        logger.debug(f"⏭️  Skipped user-modified item: {feedback_id}")
-                        continue
-
-                    # Recategorize
-                    result = enhanced_categorize_feedback(content, source, scenario, organization)
-
-                    # Update the feedback with new categorization
-                    cursor.execute(
-                        """
-                        UPDATE Feedback
-                        SET Enhanced_Category = ?,
-                            Subcategory = ?,
-                            Feature_Area = ?,
-                            Audience = ?,
-                            Priority = ?,
-                            Impacttype = ?,
-                            Categorization_Confidence = ?,
-                            Auto_Recategorized_Date = ?
-                        WHERE Feedback_ID = ?
-                    """,
-                        [
-                            result.get("primary_category", "Other"),
-                            result.get("subcategory", "Uncategorized"),
-                            result.get("feature_area", "General"),
-                            result.get("audience", "Customer"),
-                            result.get("priority", "medium"),
-                            result.get("impact_type", "FEEDBACK"),
-                            result.get("confidence", 0.0),
-                            datetime.now(),
-                            feedback_id,
-                        ],
-                    )
-
-                    recategorized_count += 1
-
-                    if recategorized_count % 100 == 0:
-                        logger.info(
-                            f"Progress: {recategorized_count}/{total_items - skipped_count} items recategorized"
-                        )
-
-                except Exception as e:
-                    logger.error(f"❌ Error recategorizing item {feedback_id}: {e}")
-                    continue
-
-            conn.commit()
-
-            result = {
-                "recategorized": recategorized_count,
-                "skipped_user_modified": skipped_count,
-                "total_processed": total_items,
-            }
-
-            logger.info(
-                f"✅ Recategorization complete: {recategorized_count} recategorized, {skipped_count} skipped (user-modified)"
-            )
-            return result
-
-        except Exception as e:
-            logger.error(f"❌ Error in recategorize_all_feedback: {e}")
-            return {"recategorized": 0, "skipped_user_modified": 0, "total_processed": 0}
-        finally:
-            if conn:
-                conn.close()
+        raise RuntimeError(
+            "Direct Fabric recategorization is disabled. Re-categorize the "
+            "authoritative local store, then synchronize it to Fabric."
+        )
 
 
 def update_feedback_states_in_fabric_sql(bearer_token: str, state_changes: List[Dict[str, Any]]) -> bool:
@@ -1082,40 +1213,7 @@ def update_feedback_states_in_fabric_sql(bearer_token: str, state_changes: List[
     Returns:
         bool: True if successful, False otherwise
     """
-    try:
-        # Always try interactive authentication for now since bearer token has issues
-        logger.info("Using interactive authentication for SQL database (bearer token method needs refinement)")
-        writer = FabricSQLWriter()
-        return writer.update_feedback_states(state_changes, use_token=False)
-
-    except Exception as e:
-        logger.error(f"Error in update_feedback_states_in_fabric_sql: {e}")
-
-        # Check if it's ODBC driver issue
-        if "Data source name not found" in str(e) or "ODBC Driver Manager" in str(e):
-            logger.warning("ODBC Driver not available")
-            return False  # Let the main app.py handle lakehouse fallback
-
-        logger.error(f"SQL database authentication failed: {e}")
-        return False
-
-
-if __name__ == "__main__":
-    # Test the SQL writer
-    print("Testing Fabric SQL Writer...")
-
-    test_changes = [
-        {
-            "feedback_id": "test-123",
-            "state": "TRIAGED",
-            "notes": "Test feedback note",
-            "domain": "PowerBI",
-            "updated_by": "test-user",
-        }
-    ]
-
-    success = update_feedback_states_in_fabric_sql(None, test_changes)
-    if success:
-        print("SUCCESS: Fabric SQL Writer test passed!")
-    else:
-        print("ERROR: Fabric SQL Writer test failed")
+    if not bearer_token:
+        raise ValueError("A Fabric bearer token is required")
+    writer = FabricSQLWriter(bearer_token=bearer_token)
+    return writer.update_feedback_states(state_changes)

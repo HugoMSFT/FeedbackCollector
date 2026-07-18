@@ -9,20 +9,35 @@ import json
 import re
 import time
 import config
+from http_client import create_retry_session
 from utils import generate_feedback_gist, categorize_feedback, enhanced_categorize_feedback, clean_feedback_text
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def analyze_sentiment(text: str) -> str:
-    blob = TextBlob(text)
-    score = blob.sentiment.polarity
+def sentiment_fields(text: str) -> Dict[str, Any]:
+    try:
+        score = float(TextBlob(text or "").sentiment.polarity)
+    except Exception:
+        logger.exception("Unable to analyze collector sentiment")
+        score = 0.0
     if score < -0.1:
-        return "Negative"
-    if score > 0.1:
-        return "Positive"
-    return "Neutral"
+        label = "Negative"
+    elif score > 0.1:
+        label = "Positive"
+    else:
+        label = "Neutral"
+    absolute_score = abs(score)
+    confidence = (
+        "High"
+        if absolute_score >= 0.5
+        else "Medium" if absolute_score >= 0.2 else "Low"
+    )
+    return {
+        "Sentiment": label,
+        "Sentiment_Score": round(score, 3),
+        "Sentiment_Confidence": confidence,
+    }
 
 
 def find_matched_keywords(text: str, keywords: List[str]) -> List[str]:
@@ -41,11 +56,7 @@ class RedditCollector:
     def __init__(self):
         self.max_items = config.MAX_ITEMS_PER_RUN
         self.subreddits = getattr(config, 'REDDIT_SUBREDDITS', [config.REDDIT_SUBREDDIT])
-        logger.debug(f"RedditCollector init with REDDIT_CLIENT_ID type: {type(config.REDDIT_CLIENT_ID).__name__}")
-        logger.debug(
-            f"RedditCollector init with REDDIT_CLIENT_SECRET type: {type(config.REDDIT_CLIENT_SECRET).__name__}"
-        )
-        logger.debug(f"RedditCollector init with REDDIT_USER_AGENT: {config.REDDIT_USER_AGENT}")
+        logger.debug("Initializing Reddit collector")
 
         # Initialize with explicit configuration to avoid praw.ini lookup
         self.reddit = praw.Reddit(
@@ -78,17 +89,23 @@ class RedditCollector:
             self.subreddits = [settings["subreddit"]]
             logger.info(f"RedditCollector configured with subreddit={settings['subreddit']}")
 
+    def close(self):
+        close = getattr(self.reddit, "close", None)
+        if callable(close):
+            close()
+
     def collect(self) -> List[Dict[str, Any]]:
         feedback_items = []
         try:
             for subreddit_name in self.subreddits:
                 logger.info(f"Collecting feedback from Reddit subreddit: r/{subreddit_name}")
-                logger.info(f"Using keywords for search: {config.KEYWORDS}")
+                logger.info(
+                    "Using %s configured keywords for Reddit search",
+                    len(config.KEYWORDS),
+                )
                 subreddit = self.reddit.subreddit(subreddit_name)
 
                 search_query = " OR ".join([f'"{k}"' for k in config.KEYWORDS])
-                logger.info(f"Reddit search query: {search_query}")
-
                 per_sub_limit = max(1, self.max_items // len(self.subreddits))
                 submissions_generator = subreddit.search(search_query, sort="new", limit=per_sub_limit)
 
@@ -98,14 +115,13 @@ class RedditCollector:
                         logger.info(f"Reached per-subreddit limit ({per_sub_limit}) for r/{subreddit_name}.")
                         break
 
-                    logger.info(f"Processing submission via search: {submission.title}")
                     reddit_url = f"https://www.reddit.com{submission.permalink}"
                     full_feedback_text = f"{submission.title}\n\n{submission.selftext}"
 
                     matched_keywords = find_matched_keywords(full_feedback_text, config.KEYWORDS)
 
                     if not matched_keywords:
-                        logger.info(f"Skipping submission (no keyword matches): {submission.title}")
+                        logger.debug("Skipping Reddit submission without a keyword match")
                         continue
 
                     tag_value = self._extract_flair(submission)
@@ -134,7 +150,7 @@ class RedditCollector:
                             "Status": config.DEFAULT_STATUS,
                             "Created_by": config.SYSTEM_USER,
                             "Rawfeedback": f"Source URL: {reddit_url}\nSubreddit: r/{subreddit_name}\nScore: {submission.score}\nNum Comments: {submission.num_comments}",
-                            "Sentiment": analyze_sentiment(full_feedback_text),
+                            **sentiment_fields(full_feedback_text),
                             "Category": enhanced_cat["legacy_category"],
                             "Enhanced_Category": enhanced_cat["primary_category"],
                             "Subcategory": enhanced_cat["subcategory"],
@@ -196,6 +212,7 @@ class RedditCollector:
                 return item.link_flair_text
             return ""
         except Exception:
+            logger.debug("Unable to read Reddit flair", exc_info=True)
             return ""
 
 
@@ -206,10 +223,14 @@ class FabricCommunityCollector:
         self.max_items_to_fetch = config.MAX_ITEMS_PER_RUN
         self.max_items = config.MAX_ITEMS_PER_RUN
         self.search_page_size = 50
-        self.session = requests.Session()
-        self.session.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
+        self.session = create_retry_session(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 Chrome/91.0.4472.124 Safari/537.36"
+                )
+            }
+        )
 
     def close(self):
         self.session.close()
@@ -252,8 +273,11 @@ class FabricCommunityCollector:
 
         query_string = " OR ".join([f'"{keyword}"' for keyword in keywords_to_use])
 
-        logger.info(f"Starting {self.source_name} HTML search for keywords: {keywords_to_use}")
-        logger.info(f"Query string for search: {query_string}")
+        logger.info(
+            "Starting %s HTML search with %s keywords",
+            self.source_name,
+            len(keywords_to_use),
+        )
 
         num_pages_to_scrape = (self.max_items_to_fetch + self.search_page_size - 1) // self.search_page_size
         num_pages_to_scrape = min(num_pages_to_scrape, 5)
@@ -275,11 +299,14 @@ class FabricCommunityCollector:
                 "search_page_size": str(self.search_page_size),
                 "page": str(page_num),
             }
-            current_url = f"{self.search_base_url}?{requests.compat.urlencode(params)}"
-            logger.info(f"Scraping search results page {page_num}: {current_url}")
+            logger.info("Scraping %s search page %s", self.source_name, page_num)
 
             try:
-                response = self.session.get(self.search_base_url, params=params, timeout=30)
+                response = self.session.get(
+                    self.search_base_url,
+                    params=params,
+                    timeout=config.REQUEST_TIMEOUT_SECONDS,
+                )
                 response.raise_for_status()
                 soup = BeautifulSoup(response.content, "html.parser")
 
@@ -321,17 +348,13 @@ class FabricCommunityCollector:
 
                         if date_text_cleaned and time_text_cleaned:
                             date_str_combined = f"{date_text_cleaned} {time_text_cleaned}"
-                            logger.debug(
-                                f"Cleaned combined date/time: '{date_str_combined}' from raw '{raw_date_text} {raw_time_text}'"
-                            )
+                            logger.debug("Parsed a community result date and time")
                         elif date_text_cleaned:  # Case where only date_span might exist
                             date_str_combined = date_text_cleaned
-                            logger.debug(f"Cleaned date only: '{date_str_combined}' from raw '{raw_date_text}'")
+                            logger.debug("Parsed a community result date")
                         else:
                             date_str_combined = None  # Will trigger fallback in _parse_community_date
-                            logger.warning(
-                                f"Could not reliably extract date/time from raw: '{raw_date_text} {raw_time_text}'"
-                            )
+                            logger.warning("Could not parse a community result date")
 
                     elif (
                         date_span
@@ -339,9 +362,7 @@ class FabricCommunityCollector:
                         raw_date_text_only = date_span.get_text(strip=True)
                         date_match_only = re.search(r"([\d\-]+)", raw_date_text_only)
                         date_str_combined = date_match_only.group(1).strip() if date_match_only else None
-                        logger.debug(
-                            f"Cleaned date only (elif branch): '{date_str_combined}' from raw '{raw_date_text_only}'"
-                        )
+                        logger.debug("Parsed a community result date")
 
                     labels_list_container = item_element.select_one("div.LabelsList")
                     tag_texts = []
@@ -369,8 +390,8 @@ class FabricCommunityCollector:
                         # Find matched keywords using title plus preview text, not the snippet alone.
                         matched_keywords = find_matched_keywords(feedback_text, keywords_to_use)
                         if not matched_keywords:
-                            logger.info(
-                                f"Skipping Fabric Community result without keyword match after extraction: {title}"
+                            logger.debug(
+                                "Skipping Fabric Community result without a keyword match"
                             )
                             continue
 
@@ -414,7 +435,7 @@ class FabricCommunityCollector:
                                 "Status": config.DEFAULT_STATUS,
                                 "Created_by": config.SYSTEM_USER,
                                 "Rawfeedback": json.dumps(raw_feedback_data),
-                                "Sentiment": analyze_sentiment(feedback_text),  # Analyze new feedback_text
+                                **sentiment_fields(feedback_text),
                                 "Category": enhanced_cat["legacy_category"],  # Backward compatibility
                                 "Enhanced_Category": enhanced_cat["primary_category"],
                                 "Subcategory": enhanced_cat["subcategory"],
@@ -431,18 +452,21 @@ class FabricCommunityCollector:
                                 f"Collected {len(feedback_items)} relevant items from {self.source_name} search..."
                             )
                     else:
-                        logger.warning(
-                            f"Skipping search result item: missing title/href. Title: {title_tag}, Author: {author_tag}, Date: {date_str_combined}"
-                        )
+                        logger.warning("Skipping malformed community search result")
                 time.sleep(1.5)
             except requests.exceptions.RequestException as e:
-                logger.error(f"Error scraping {self.source_name} search page {current_url}: {e}", exc_info=True)
+                logger.error(
+                    "Error scraping %s search page %s: %s",
+                    self.source_name,
+                    page_num,
+                    type(e).__name__,
+                )
                 break
             except Exception as e:
                 logger.error(
                     f"An unexpected error occurred processing {self.source_name} page {page_num}: {e}", exc_info=True
                 )
-                break
+                raise
         logger.info(f"Finished {self.source_name} search. Total items: {len(feedback_items)}")
         return feedback_items[: self.max_items_to_fetch]
 
@@ -506,13 +530,14 @@ class FabricCommunityCollector:
 class GitHubDiscussionsCollector:
     def __init__(self):
         self.max_items = config.MAX_ITEMS_PER_RUN
-        self.session = requests.Session()
-        self.session.headers = {
-            "Authorization": f"Bearer {config.GITHUB_TOKEN}",
+        headers = {
             "Content-Type": "application/json",
             "Accept": "application/vnd.github+json",
             "X-Github-Api-Version": "2022-11-28",
         }
+        if config.GITHUB_TOKEN:
+            headers["Authorization"] = f"Bearer {config.GITHUB_TOKEN}"
+        self.session = create_retry_session(headers)
         self.owner = config.GITHUB_REPO_OWNER
         self.repo = config.GITHUB_REPO_NAME
 
@@ -534,9 +559,15 @@ class GitHubDiscussionsCollector:
         try:
             repo_url = f"https://api.github.com/repos/{self.owner}/{self.repo}"
             logger.info(f"Verifying access to {repo_url}")
-            repo_response = self.session.get(repo_url)
+            repo_response = self.session.get(
+                repo_url,
+                timeout=config.REQUEST_TIMEOUT_SECONDS,
+            )
             repo_response.raise_for_status()
-            if not repo_response.json().get("has_discussions"):
+            repository_data = repo_response.json()
+            if not isinstance(repository_data, dict):
+                raise ValueError("GitHub repository response was not an object")
+            if not repository_data.get("has_discussions"):
                 logger.error("Discussions are not enabled on this repository")
                 return []
             all_discussions, page, per_page = [], 1, min(100, self.max_items)
@@ -553,9 +584,13 @@ class GitHubDiscussionsCollector:
                 discussions_resp = self.session.get(
                     discussions_url,
                     params={"page": page, "per_page": current_page_limit, "sort": "updated", "direction": "desc"},
+                    timeout=config.REQUEST_TIMEOUT_SECONDS,
                 )
                 discussions_resp.raise_for_status()
+
                 page_data = discussions_resp.json()
+                if not isinstance(page_data, list):
+                    raise ValueError("GitHub discussions response was not a list")
                 if not page_data:
                     break
                 all_discussions.extend(page_data)
@@ -571,7 +606,10 @@ class GitHubDiscussionsCollector:
                 if count >= self.max_items:
                     break
                 title, body = discussion.get("title", ""), discussion.get("body", "")
-                logger.info(f"Processing GitHub discussion: {title}")
+                logger.debug(
+                    "Processing GitHub discussion %s",
+                    discussion.get("number", "unknown"),
+                )
                 author_node = discussion.get("user")
                 author = author_node.get("login", "Anonymous") if author_node else "Anonymous"
                 created_at_str = discussion.get("created_at", datetime.now(timezone.utc).isoformat())
@@ -608,7 +646,7 @@ class GitHubDiscussionsCollector:
                         "Status": config.DEFAULT_STATUS,
                         "Created_by": config.SYSTEM_USER,
                         "Rawfeedback": f"Source URL: {url}\nRaw API Response: {json.dumps(discussion, indent=2)}",
-                        "Sentiment": analyze_sentiment(full_feedback_text_github),
+                        **sentiment_fields(full_feedback_text_github),
                         "Category": enhanced_cat["legacy_category"],  # Backward compatibility
                         "Enhanced_Category": enhanced_cat["primary_category"],
                         "Subcategory": enhanced_cat["subcategory"],
@@ -625,7 +663,7 @@ class GitHubDiscussionsCollector:
             return feedback_items[: self.max_items]
         except Exception as e:
             logger.error(f"Error collecting GitHub feedback: {str(e)}", exc_info=True)
-            return []
+            raise
 
     def _determine_impact_type_content(self, content: str) -> str:
         content_lower = content.lower()
@@ -641,13 +679,14 @@ class GitHubDiscussionsCollector:
 class GitHubIssuesCollector:
     def __init__(self):
         self.max_items = config.MAX_ITEMS_PER_RUN
-        self.session = requests.Session()
-        self.session.headers = {
-            "Authorization": f"Bearer {config.GITHUB_TOKEN}",
+        headers = {
             "Content-Type": "application/json",
             "Accept": "application/vnd.github+json",
             "X-Github-Api-Version": "2022-11-28",
         }
+        if config.GITHUB_TOKEN:
+            headers["Authorization"] = f"Bearer {config.GITHUB_TOKEN}"
+        self.session = create_retry_session(headers)
         self.owner = config.GITHUB_REPO_OWNER
         self.repo = config.GITHUB_REPO_NAME
 
@@ -669,7 +708,10 @@ class GitHubIssuesCollector:
         try:
             repo_url = f"https://api.github.com/repos/{self.owner}/{self.repo}"
             logger.info(f"Verifying access to {repo_url}")
-            repo_response = self.session.get(repo_url)
+            repo_response = self.session.get(
+                repo_url,
+                timeout=config.REQUEST_TIMEOUT_SECONDS,
+            )
             repo_response.raise_for_status()
 
             all_issues, page, per_page = [], 1, min(100, self.max_items)
@@ -696,10 +738,13 @@ class GitHubIssuesCollector:
                         "sort": "updated",
                         "direction": "desc",
                     },
+                    timeout=config.REQUEST_TIMEOUT_SECONDS,
                 )
                 issues_resp.raise_for_status()
-                page_data = issues_resp.json()
 
+                page_data = issues_resp.json()
+                if not isinstance(page_data, list):
+                    raise ValueError("GitHub issues response was not a list")
                 if not page_data:
                     break
 
@@ -724,7 +769,7 @@ class GitHubIssuesCollector:
 
                 title, body = issue.get("title", ""), issue.get("body", "") or ""
                 issue_number = issue.get("number", "")
-                logger.info(f"Processing GitHub issue #{issue_number}: {title}")
+                logger.debug("Processing GitHub issue #%s", issue_number)
 
                 author_node = issue.get("user")
                 author = author_node.get("login", "Anonymous") if author_node else "Anonymous"
@@ -771,7 +816,7 @@ class GitHubIssuesCollector:
                         "Status": "Closed" if state == "closed" else config.DEFAULT_STATUS,
                         "Created_by": config.SYSTEM_USER,
                         "Rawfeedback": f"Source URL: {url}\nIssue Number: {issue_number}\nState: {state}\nRaw API Response: {json.dumps(issue, indent=2)}",
-                        "Sentiment": analyze_sentiment(full_feedback_text_github),
+                        **sentiment_fields(full_feedback_text_github),
                         "Category": enhanced_cat["legacy_category"],
                         "Enhanced_Category": enhanced_cat["primary_category"],
                         "Subcategory": enhanced_cat["subcategory"],
@@ -790,7 +835,7 @@ class GitHubIssuesCollector:
 
         except Exception as e:
             logger.error(f"Error collecting GitHub Issues: {str(e)}", exc_info=True)
-            return []
+            raise
 
     def _determine_impact_type_content(self, content: str, labels: List[Dict[str, Any]]) -> str:
         """Determine impact type from content and labels"""
@@ -928,7 +973,7 @@ class ADOChildTasksCollector:
                             "Status": config.DEFAULT_STATUS,
                             "Created_by": config.SYSTEM_USER,
                             "Rawfeedback": f"Source URL: {work_item_url}\nParent Work Item: {self.parent_work_item_id}\nRaw Data: {json.dumps(task_data['raw_task'], indent=2)}",
-                            "Sentiment": analyze_sentiment(cleaned_description),
+                            **sentiment_fields(cleaned_description),
                             "Category": enhanced_cat["legacy_category"],  # Backward compatibility
                             "Enhanced_Category": enhanced_cat["primary_category"],
                             "Subcategory": enhanced_cat["subcategory"],
@@ -951,18 +996,13 @@ class ADOChildTasksCollector:
 
         except Exception as e:
             logger.error(f"Error collecting ADO child tasks: {str(e)}", exc_info=True)
-            return []
+            raise
 
     def _get_work_item_details(self, work_item_id: str) -> Dict[str, Any]:
-        """Get details of a specific work item using MCP tools"""
-        try:
-            from utils import call_mcp_tool
-
-            result = call_mcp_tool("ado-tools", "get_task_details", {"taskIdOrUrl": work_item_id})
-            return result if result else {}
-        except Exception as e:
-            logger.error(f"Error getting work item details for {work_item_id}: {e}", exc_info=True)
-            return {}
+        """Reject the retired MCP-backed ADO collector path."""
+        raise NotImplementedError(
+            "ADOChildTasksCollector is retired; use ado_client.get_working_ado_items"
+        )
 
     def _get_child_tasks(self, parent_work_item_id: str) -> List[Dict[str, Any]]:
         """Get related work items around the specified work item ID using MCP tools"""
@@ -1014,11 +1054,12 @@ class StackOverflowCollector:
         self.site = site
         self.api_base = getattr(config, "STACKEXCHANGE_API_BASE", "https://api.stackexchange.com/2.3")
         self.max_items = config.MAX_ITEMS_PER_RUN
-        self.session = requests.Session()
-        self.session.headers = {
-            "User-Agent": "FeedbackCollector/1.0",
-            "Accept": "application/json",
-        }
+        self.session = create_retry_session(
+            {
+                "User-Agent": "FeedbackCollector/1.0",
+                "Accept": "application/json",
+            }
+        )
 
     def close(self):
         self.session.close()
@@ -1063,11 +1104,23 @@ class StackOverflowCollector:
 
                 url = f"{self.api_base}/search/advanced"
                 logger.info(f"Fetching {self.source_name} page {page}")
-                response = self.session.get(url, params=params, timeout=30)
+                response = self.session.get(
+                    url,
+                    params=params,
+                    timeout=config.REQUEST_TIMEOUT_SECONDS,
+                )
                 response.raise_for_status()
 
                 data = response.json()
+                if not isinstance(data, dict):
+                    raise ValueError(
+                        f"{self.source_name} response was not an object"
+                    )
                 items = data.get("items", [])
+                if not isinstance(items, list):
+                    raise ValueError(
+                        f"{self.source_name} items response was not a list"
+                    )
 
                 if not items:
                     break
@@ -1136,7 +1189,7 @@ class StackOverflowCollector:
                                 "is_answered": is_answered,
                                 "tags": tags_list,
                             }),
-                            "Sentiment": analyze_sentiment(full_text),
+                            **sentiment_fields(full_text),
                             "Category": enhanced_cat["legacy_category"],
                             "Enhanced_Category": enhanced_cat["primary_category"],
                             "Subcategory": enhanced_cat["subcategory"],
@@ -1160,6 +1213,7 @@ class StackOverflowCollector:
 
         except Exception as e:
             logger.error(f"Error collecting from {self.source_name}: {e}", exc_info=True)
+            raise
 
         logger.info(f"Collected {len(feedback_items)} items from {self.source_name}")
         return feedback_items[: self.max_items]
@@ -1187,11 +1241,12 @@ class MicrosoftQandACollector:
         self.base_url = "https://learn.microsoft.com/en-us/answers/search"
         self.api_url = "https://learn.microsoft.com/api/answers/search"
         self.max_items = config.MAX_ITEMS_PER_RUN
-        self.session = requests.Session()
-        self.session.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        }
+        self.session = create_retry_session(
+            {
+                "User-Agent": "FeedbackCollector/1.0",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            }
+        )
 
     def close(self):
         self.session.close()
@@ -1211,7 +1266,11 @@ class MicrosoftQandACollector:
 
         # Search for each keyword group
         query_string = " OR ".join([f'"{k}"' for k in keywords_to_use[:8]])
-        logger.info(f"Starting {self.source_name} collection with query: {query_string[:100]}...")
+        logger.info(
+            "Starting %s collection with %s keywords",
+            self.source_name,
+            len(keywords_to_use[:8]),
+        )
 
         try:
             # Scrape the search results page
@@ -1227,7 +1286,11 @@ class MicrosoftQandACollector:
                 params["page"] = page_num
                 logger.info(f"Fetching {self.source_name} page {page_num}")
 
-                response = self.session.get(self.base_url, params=params, timeout=30)
+                response = self.session.get(
+                    self.base_url,
+                    params=params,
+                    timeout=config.REQUEST_TIMEOUT_SECONDS,
+                )
                 response.raise_for_status()
 
                 soup = BeautifulSoup(response.content, "html.parser")
@@ -1292,7 +1355,7 @@ class MicrosoftQandACollector:
                             "Status": config.DEFAULT_STATUS,
                             "Created_by": config.SYSTEM_USER,
                             "Rawfeedback": json.dumps({"title": title, "url": url_path, "snippet": snippet}),
-                            "Sentiment": analyze_sentiment(full_text),
+                            **sentiment_fields(full_text),
                             "Category": enhanced_cat["legacy_category"],
                             "Enhanced_Category": enhanced_cat["primary_category"],
                             "Subcategory": enhanced_cat["subcategory"],
@@ -1309,6 +1372,7 @@ class MicrosoftQandACollector:
 
         except Exception as e:
             logger.error(f"Error collecting from {self.source_name}: {e}", exc_info=True)
+            raise
 
         logger.info(f"Collected {len(feedback_items)} items from {self.source_name}")
         return feedback_items[: self.max_items]
@@ -1331,10 +1395,9 @@ class TechCommunityCollector:
         self.source_name = "Tech Community"
         self.search_url = "https://techcommunity.microsoft.com/t5/forums/searchpage/tab/message"
         self.max_items = config.MAX_ITEMS_PER_RUN
-        self.session = requests.Session()
-        self.session.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        }
+        self.session = create_retry_session(
+            {"User-Agent": "FeedbackCollector/1.0"}
+        )
 
     def close(self):
         self.session.close()
@@ -1369,7 +1432,11 @@ class TechCommunityCollector:
                 }
 
                 logger.info(f"Fetching {self.source_name} page {page_num}")
-                response = self.session.get(self.search_url, params=params, timeout=30)
+                response = self.session.get(
+                    self.search_url,
+                    params=params,
+                    timeout=config.REQUEST_TIMEOUT_SECONDS,
+                )
                 response.raise_for_status()
 
                 soup = BeautifulSoup(response.content, "html.parser")
@@ -1440,7 +1507,7 @@ class TechCommunityCollector:
                                 "author": author,
                                 "date_text": date_text,
                             }),
-                            "Sentiment": analyze_sentiment(full_text),
+                            **sentiment_fields(full_text),
                             "Category": enhanced_cat["legacy_category"],
                             "Enhanced_Category": enhanced_cat["primary_category"],
                             "Subcategory": enhanced_cat["subcategory"],
@@ -1457,6 +1524,7 @@ class TechCommunityCollector:
 
         except Exception as e:
             logger.error(f"Error collecting from {self.source_name}: {e}", exc_info=True)
+            raise
 
         logger.info(f"Collected {len(feedback_items)} items from {self.source_name}")
         return feedback_items[: self.max_items]

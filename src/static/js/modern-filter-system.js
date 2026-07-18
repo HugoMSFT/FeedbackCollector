@@ -420,22 +420,19 @@ class ModernFilterSystem {
                 params.set('search', this.searchQuery);
             }
             
-            // Preserve Fabric connection state
-            if (window.fabricConnected || window.stateManagementEnabled) {
-                params.set('fabric_connected', 'true');
-                console.log('🔧 AJAX: Preserving Fabric connection state');
-            }
-            
             console.log('🔄 Fetching filtered data with activeFilters:', Array.from(this.activeFilters.entries()));
             console.log('🔄 Fetching filtered data with params:', params.toString());
             
             const response = await fetch(`${this.config.apiEndpoint}?${params.toString()}`);
             const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || data.message || `Request failed (${response.status})`);
+            }
             
-            if (data.success) {
+            if (data.success && Array.isArray(data.feedback)) {
                 this.filteredData = data.feedback;
-                this.totalCount = data.total_count;
-                this.hasMore = data.has_more;
+                this.totalCount = window.SafeDOM.finiteNumber(data.total_count);
+                this.hasMore = Boolean(data.has_more);
                 this.lastResponse = data;  // Store the full response for state data access
                 
                 this.renderFeedbackCards();
@@ -449,15 +446,16 @@ class ModernFilterSystem {
                 // CRITICAL: Preserve state management after AJAX load
                 this.preserveStateManagement();
                 
-                console.log(`✅ Loaded ${data.feedback.length} items (${data.total_count} total)`);
-                if (data.fabric_state_data && Object.keys(data.fabric_state_data).length > 0) {
+                console.log(`✅ Loaded ${data.feedback.length} items (${this.totalCount} total)`);
+                if (data.fabric_state_data && typeof data.fabric_state_data === 'object' &&
+                    Object.keys(data.fabric_state_data).length > 0) {
                     console.log(`🎯 Included ${Object.keys(data.fabric_state_data).length} state records`);
                 }
                 if (data.repeating_analysis) {
                     console.log(`🔄 Repeating analysis: ${data.repeating_analysis.cluster_count} clusters found`);
                 }
             } else {
-                this.showError(data.message || 'Failed to load filtered data');
+                throw new Error(data.error || data.message || 'The filter response was invalid');
             }
         } catch (error) {
             this.showError('Failed to load filtered data');
@@ -530,21 +528,38 @@ class ModernFilterSystem {
     
     generateFeedbackCardHtml(item, fabricStateData = {}) {
         // Generate the HTML for a feedback card that matches the template structure
-        const feedbackId = item.Feedback_ID || 'unknown';
+        const feedbackId = String(item.Feedback_ID || 'unknown');
+        const feedbackIdAttr = this.escapeHtml(feedbackId);
         
         // Use state from Fabric if available, otherwise use item's state, default to NEW
-        let state = item.State || 'NEW';
+        let state = String(item.State || 'NEW').toUpperCase();
         if (fabricStateData[feedbackId] && fabricStateData[feedbackId].state) {
-            state = fabricStateData[feedbackId].state;
+            state = String(fabricStateData[feedbackId].state).toUpperCase();
             console.log(`🎯 Using Fabric state for ${feedbackId}: ${state}`);
         }
+        if (!['NEW', 'TRIAGED', 'CLOSED', 'IRRELEVANT'].includes(state)) {
+            state = 'NEW';
+        }
         
-        const stateClass = state.toLowerCase();
+        const stateClass = window.SafeDOM.classToken(state);
         const stateBadge = this.getStateBadge(state);
         const domainBadge = this.getDomainBadge(item.Primary_Domain, feedbackId);
         const sentimentBadge = this.getSentimentBadge(item.Sentiment, item);
-        const audienceBadge = this.getAudienceBadge(item.Audience);
+        const audienceBadge = this.getAudienceBadge(item.Audience, feedbackId);
         const priorityBadge = this.getPriorityBadge(item.Priority);
+        const sourceText = this.escapeHtml(
+            item.Sources || item.Source || 'Unknown Source'
+        );
+        const createdDate = item.Created && String(item.Created).trim()
+            ? ` - ${this.escapeHtml(String(item.Created).split('T')[0])}`
+            : '';
+        const sourceUrl = window.SafeDOM.safeUrl(item.Url);
+        const lastUpdated = fabricStateData[feedbackId]?.last_updated || item.Last_Updated;
+        const updatedBy = fabricStateData[feedbackId]?.updated_by || item.Updated_By;
+        const confidence = window.SafeDOM.finiteNumber(
+            item.Categorization_Confidence,
+            0
+        );
         
         // Get the proper title - use Feedback_Gist, fallback to Title, then fallback to source info
         let cardTitle = 'Untitled';
@@ -560,14 +575,13 @@ class ModernFilterSystem {
         
         return `
             <div class="col">
-                <div class="fluent-card h-100 d-flex flex-column" id="card-${feedbackId}">
+                <div class="fluent-card h-100 d-flex flex-column" id="card-${feedbackIdAttr}">
                     <div class="fluent-card-header border-bottom-0 pb-0 pt-3 px-3">
                         <h5 class="fluent-section-title mb-1 fluent-card-title-truncate" style="font-size: 1.1rem; line-height: 1.4;" title="${this.escapeHtml(cardTitle)}">
                             ${this.escapeHtml(cardTitle)}
                         </h5>
                         <h6 class="text-muted small mb-2">
-                            ${item.Sources || item.Source || 'Unknown Source'}
-                            ${item.Created && item.Created.trim() ? ` - ${item.Created.split('T')[0]}` : ''}
+                            ${sourceText}${createdDate}
                         </h6>
                     </div>
                         
@@ -579,12 +593,12 @@ class ModernFilterSystem {
                                 ${priorityBadge}
                                 
                                 <span class="state-badge state-${stateClass}"
-                                      data-feedback-id="${feedbackId}"
-                                      data-current-state="${state}"
+                                      data-feedback-id="${feedbackIdAttr}"
+                                      data-current-state="${this.escapeHtml(state)}"
                                       onclick="toggleStateDropdown(this, event)"
                                       title="Click to change state">
                                     ${stateBadge}
-                                    <div class="state-dropdown" data-feedback-id="${feedbackId}">
+                                    <div class="state-dropdown" data-feedback-id="${feedbackIdAttr}">
                                         <div class="state-option" data-state="NEW">🆕 New</div>
                                         <div class="state-option" data-state="TRIAGED">🔍 Triaged</div>
                                         <div class="state-option" data-state="CLOSED">✅ Closed</div>
@@ -592,10 +606,10 @@ class ModernFilterSystem {
                                     </div>
                                 </span>
                                 
-                                ${(fabricStateData[feedbackId]?.last_updated || item.Last_Updated) && (fabricStateData[feedbackId]?.last_updated || item.Last_Updated).trim() ? `
+                                ${lastUpdated && String(lastUpdated).trim() ? `
                                 <small class="text-muted">
-                                    Updated: ${(fabricStateData[feedbackId]?.last_updated || item.Last_Updated).split('T')[0]}
-                                    ${(fabricStateData[feedbackId]?.updated_by || item.Updated_By) && (fabricStateData[feedbackId]?.updated_by || item.Updated_By).trim() ? ` by ${fabricStateData[feedbackId]?.updated_by || item.Updated_By}` : ''}
+                                    Updated: ${this.escapeHtml(String(lastUpdated).split('T')[0])}
+                                    ${updatedBy && String(updatedBy).trim() ? ` by ${this.escapeHtml(updatedBy)}` : ''}
                                 </small>
                                 ` : ''}
                             </div>
@@ -610,38 +624,38 @@ class ModernFilterSystem {
                         
                         <div class="category-info mb-3 small text-muted interactive-categories">
                             <span class="text-uppercase fw-bold text-muted me-2" style="font-size: 0.65rem; letter-spacing: 1px;">Category</span>
-                            ${item.Categorization_Confidence ? `<i class="bi bi-info-circle me-2 text-muted" style="font-size: 0.75rem; cursor: help;" title="Confidence: ${Math.round(item.Categorization_Confidence * 100)}%"></i>` : ''}
+                            ${confidence ? `<i class="bi bi-info-circle me-2 text-muted" style="font-size: 0.75rem; cursor: help;" title="Confidence: ${Math.round(confidence * 100)}%"></i>` : ''}
                             <span class="category-chip"
-                                  data-category-feedback-id="${feedbackId}"
+                                  data-category-feedback-id="${feedbackIdAttr}"
                                   data-category-name="${this.escapeHtml(item.Enhanced_Category || '')}"
                                   data-subcategory-name="${this.escapeHtml(item.Subcategory || '')}"
                                   data-feature-area="${this.escapeHtml(item.Feature_Area || '')}"
-                                  data-domain-code="${domainBadge.code}"
+                                  data-domain-code="${this.escapeHtml(domainBadge.code)}"
                                   onclick="showCategoryPickerFromElement(this)"
                                   title="Click to update category">
                                 ${(item.Enhanced_Category && item.Enhanced_Category.trim()) ? this.escapeHtml(item.Enhanced_Category) : 'Set category'}
                             </span>
                             <span class="subcategory-chip${!(item.Subcategory && item.Subcategory.trim()) ? ' subcategory-empty' : ''}"
-                                  data-category-feedback-id="${feedbackId}"
+                                  data-category-feedback-id="${feedbackIdAttr}"
                                   data-category-name="${this.escapeHtml(item.Enhanced_Category || '')}"
                                   data-subcategory-name="${this.escapeHtml(item.Subcategory || '')}"
                                   data-feature-area="${this.escapeHtml(item.Feature_Area || '')}"
-                                  data-domain-code="${domainBadge.code}"
+                                  data-domain-code="${this.escapeHtml(domainBadge.code)}"
                                   onclick="showCategoryPickerFromElement(this)"
                                   title="Click to update subcategory">
                                 ${(item.Subcategory && item.Subcategory.trim()) ? this.escapeHtml(item.Subcategory) : 'Add subcategory'}
                             </span>
                                                         <span class="domain-badge"
                                                                     style="background-color: ${domainBadge.color};"
-                                                                    data-domain-code="${domainBadge.code}"
-                                                                    data-domain-name="${domainBadge.display}"
-                                                                    data-category-feedback-id="${feedbackId}"
+                                                                    data-domain-code="${this.escapeHtml(domainBadge.code)}"
+                                                                    data-domain-name="${this.escapeHtml(domainBadge.display)}"
+                                                                    data-category-feedback-id="${feedbackIdAttr}"
                                                                     data-category-name="${this.escapeHtml(item.Enhanced_Category || '')}"
                                                                     data-subcategory-name="${this.escapeHtml(item.Subcategory || '')}"
                                                                     data-feature-area="${this.escapeHtml(item.Feature_Area || '')}"
                                                                     onclick="showCategoryPickerFromElement(this)"
                                                                     title="Click to update domain">
-                                                                ${domainBadge.display}
+                                                                ${this.escapeHtml(domainBadge.display)}
                                                         </span>
                         </div>
                         
@@ -650,11 +664,11 @@ class ModernFilterSystem {
                         </p>
                         
                         <div class="mt-auto pt-3 d-flex align-items-center flex-wrap gap-2">
-                            ${item.Url && item.Url.trim() ? `
-                                <a href="${item.Url}" class="fluent-button fluent-button-secondary" target="_blank" rel="noopener noreferrer" style="min-height: 32px; padding: 4px 12px;">View Source</a>
+                            ${sourceUrl ? `
+                                <a href="${this.escapeHtml(sourceUrl)}" class="fluent-button fluent-button-secondary" target="_blank" rel="noopener noreferrer" style="min-height: 32px; padding: 4px 12px;">View Source</a>
                             ` : ''}
-                            ${item.Tag && item.Tag.trim() ? `
-                                <span class="fluent-badge fluent-badge-secondary" title="Source Tag: ${item.Tag}"><i class="bi bi-tag-fill me-1"></i>${item.Tag}</span>
+                            ${item.Tag && String(item.Tag).trim() ? `
+                                <span class="fluent-badge fluent-badge-secondary" title="Source Tag: ${this.escapeHtml(item.Tag)}"><i class="bi bi-tag-fill me-1"></i>${this.escapeHtml(item.Tag)}</span>
                             ` : ''}
                             ${sentimentBadge ? sentimentBadge : ''}
                             ${this.getKeywordBadges(item.Matched_Keywords)}
@@ -707,7 +721,7 @@ class ModernFilterSystem {
         const displayName = domainNames[domain] || domain;
         const color = domainColors[domain] || '#6c757d';
         return {
-            html: `<span class="domain-badge" style="background-color: ${color};" data-domain-code="${this.escapeHtml(domain)}" data-domain-name="${this.escapeHtml(displayName)}" data-category-feedback-id="${feedbackId}" onclick="showCategoryPickerFromElement(this)">${this.escapeHtml(displayName)}</span>`,
+            html: `<span class="domain-badge" style="background-color: ${color};" data-domain-code="${this.escapeHtml(domain)}" data-domain-name="${this.escapeHtml(displayName)}" data-category-feedback-id="${this.escapeHtml(feedbackId)}" onclick="showCategoryPickerFromElement(this)">${this.escapeHtml(displayName)}</span>`,
             color,
             display: displayName,
             code: domain
@@ -717,7 +731,8 @@ class ModernFilterSystem {
     getSentimentBadge(sentiment, item = null) {
         if (!sentiment) return '';
         
-        const sentimentLower = sentiment.toLowerCase();
+        const sentimentText = String(sentiment);
+        const sentimentLower = sentimentText.toLowerCase();
         let badgeClass = 'fluent-badge-secondary';
         let emoji = '😐';
         
@@ -729,13 +744,20 @@ class ModernFilterSystem {
             emoji = '😞';
         }
         
-        let title = `Sentiment: ${sentiment}`;
+        let title = `Sentiment: ${sentimentText}`;
         if (item) {
-            if (item.Sentiment_Score) title += ` (Score: ${item.Sentiment_Score})`;
-            if (item.Sentiment_Confidence) title += ` - Confidence: ${item.Sentiment_Confidence}`;
+            const score = window.SafeDOM.finiteNumber(item.Sentiment_Score, NaN);
+            const confidence = window.SafeDOM.finiteNumber(
+                item.Sentiment_Confidence,
+                NaN
+            );
+            if (Number.isFinite(score)) title += ` (Score: ${score})`;
+            if (Number.isFinite(confidence)) {
+                title += ` - Confidence: ${confidence}`;
+            }
         }
         
-        return `<span class="fluent-badge ${badgeClass}" title="${title}">${emoji} ${sentiment}</span>`;
+        return `<span class="fluent-badge ${badgeClass}" title="${this.escapeHtml(title)}">${emoji} ${this.escapeHtml(sentimentText)}</span>`;
     }
 
     getKeywordBadges(keywords) {
@@ -751,59 +773,58 @@ class ModernFilterSystem {
         html += '<span class="keyword-label small text-muted fw-bold">🔑 Keywords:</span>';
         
         keywordsToShow.forEach(keyword => {
-            html += `<span class="fluent-badge fluent-badge-secondary" style="background: #e1dfdd; color: #323130;">${keyword}</span>`;
+            html += `<span class="fluent-badge fluent-badge-secondary" style="background: #e1dfdd; color: #323130;">${this.escapeHtml(keyword)}</span>`;
         });
         
         if (remainingCount > 0) {
-            html += `<span class="fluent-badge fluent-badge-primary" title="${remainingKeywords}">+${remainingCount} more</span>`;
+            html += `<span class="fluent-badge fluent-badge-primary" title="${this.escapeHtml(remainingKeywords)}">+${remainingCount} more</span>`;
         }
         
         html += '</span>';
         return html;
     }
     
-    getAudienceBadge(audience) {
+    getAudienceBadge(audience, feedbackId) {
         if (!audience) return '';
+        const audienceText = String(audience);
         const audienceData = {
             'Developer': '🛠️ Developer',
             'Customer': '👤 Customer',
             'ISV': '🏢 ISV'
         };
-        const displayText = audienceData[audience] || audience;
-        return `<span class="audience-badge audience-${audience?.toLowerCase()}" 
-                        onclick="updateAudience('', '${audience}')" 
+        const displayText = audienceData[audienceText] || audienceText;
+        return `<span class="audience-badge audience-${window.SafeDOM.classToken(audienceText)}"
+                        data-feedback-id="${this.escapeHtml(feedbackId)}"
+                        data-audience="${this.escapeHtml(audienceText)}"
                         title="Click to update audience" 
-                        style="cursor: pointer;">${displayText}</span>`;
+                        style="cursor: pointer;">${this.escapeHtml(displayText)}</span>`;
     }
     
     getPriorityBadge(priority) {
         if (!priority) return '';
+        const priorityText = String(priority);
         const priorityData = {
             'critical': '🔴 Critical',
             'high': '🟠 High',
             'medium': '🟡 Medium',
             'low': '⚪ Low'
         };
-        const displayText = priorityData[priority?.toLowerCase()] || priority;
-        return `<span class="priority-badge priority-${priority?.toLowerCase()}" title="Priority: ${priority}">${displayText}</span>`;
+        const priorityToken = window.SafeDOM.classToken(priorityText);
+        const displayText = priorityData[priorityText.toLowerCase()] || priorityText;
+        return `<span class="priority-badge priority-${priorityToken}" title="Priority: ${this.escapeHtml(priorityText)}">${this.escapeHtml(displayText)}</span>`;
     }
     
     preserveStateManagement() {
-        // Ensure Fabric connection state is maintained after AJAX load
-        if (window.fabricConnected || window.stateManagementEnabled) {
-            document.body.classList.remove('state-management-disabled');
-            
-            // Update sync button if it exists
+        // Local editing remains enabled after replacing cards through AJAX.
+        document.body.classList.remove('state-management-disabled');
+
+        if (window.fabricConnected) {
             const syncBtn = document.getElementById('fabricSyncBtn');
             if (syncBtn && !syncBtn.innerHTML.includes('Connected')) {
                 syncBtn.innerHTML = '<i class="bi bi-database me-1"></i>Sync with Fabric <span class="badge bg-success ms-1">Connected</span>';
             }
-            
-            console.log('🔧 AJAX: State management preserved after filter');
-            
-            // Update status display to reflect new connection state
-            this.updateStatusDisplay();
         }
+        this.updateStatusDisplay();
         
         // Reapply cached changes if they exist
         setTimeout(() => {
@@ -828,6 +849,18 @@ class ModernFilterSystem {
                     }
                 };
             }
+        });
+        document.querySelectorAll('.audience-badge').forEach(badge => {
+            if (badge.dataset.audienceBound === 'true') return;
+            badge.dataset.audienceBound = 'true';
+            badge.addEventListener('click', () => {
+                if (typeof updateAudience === 'function') {
+                    updateAudience(
+                        badge.dataset.feedbackId || '',
+                        badge.dataset.audience || ''
+                    );
+                }
+            });
         });
     }
     
@@ -860,11 +893,6 @@ class ModernFilterSystem {
         // Add search query
         if (this.searchQuery) {
             url.searchParams.set('search', this.searchQuery);
-        }
-        
-        // Preserve Fabric connection
-        if (window.fabricConnected || window.stateManagementEnabled) {
-            url.searchParams.set('fabric_connected', 'true');
         }
         
         // Update URL without reload
@@ -928,10 +956,10 @@ class ModernFilterSystem {
         }
         
         // Determine connection mode
-        const isConnected = window.fabricConnected || window.stateManagementEnabled;
-        const mode = isConnected ? 'ONLINE' : 'OFFLINE';
-        const modeClass = isConnected ? 'text-success' : 'text-muted';
-        const modeIcon = isConnected ? '🟢' : '🔴';
+        const isConnected = Boolean(window.fabricConnected);
+        const mode = isConnected ? 'FABRIC CONNECTED' : 'LOCAL';
+        const modeClass = isConnected ? 'text-success' : 'text-primary';
+        const modeIcon = isConnected ? '🟢' : '🔵';
         
         // Determine if filters are active (exclude non-filtering options)
         const excludedFilterKeys = ['sort', 'show_repeating', 'show_only_stored'];
@@ -955,7 +983,7 @@ class ModernFilterSystem {
                 </span>
                 <span class="${modeClass}">
                     ${modeIcon} <strong>Mode: ${mode}</strong>
-                    ${isConnected ? '<small class="ms-2 text-muted">(State management enabled)</small>' : '<small class="ms-2 text-muted">(Read-only mode)</small>'}
+                    ${isConnected ? '<small class="ms-2 text-muted">(Fabric sync available)</small>' : '<small class="ms-2 text-muted">(SQLite editing)</small>'}
                 </span>
             </div>
         `;
@@ -984,29 +1012,40 @@ class ModernFilterSystem {
         
         filtersContainer.style.display = 'block';
         
-        let html = '<div class="d-flex flex-wrap align-items-center gap-2 mb-2">';
-        html += '<span class="text-muted">Active filters:</span>';
-        
+        const wrapper = document.createElement('div');
+        wrapper.className = 'd-flex flex-wrap align-items-center gap-2 mb-2';
+        const label = document.createElement('span');
+        label.className = 'text-muted';
+        label.textContent = 'Active filters:';
+        wrapper.appendChild(label);
+
         this.activeFilters.forEach((value, key) => {
             if (key === 'sort' || key === 'show_repeating' || key === 'show_only_stored') return;
-            
+
             const displayValue = Array.isArray(value) ? value.join(', ') : value;
-            html += `
-                <span class="badge bg-primary filter-tag" data-filter-type="${key}">
-                    ${key}: ${displayValue}
-                    <i class="bi bi-x ms-1" onclick="window.modernFilterSystem.removeFilter('${key}')" style="cursor: pointer;"></i>
-                </span>
-            `;
+            const badge = document.createElement('span');
+            badge.className = 'badge bg-primary filter-tag';
+            badge.dataset.filterType = String(key);
+            badge.appendChild(
+                document.createTextNode(`${key}: ${String(displayValue)} `)
+            );
+            const remove = document.createElement('i');
+            remove.className = 'bi bi-x ms-1';
+            remove.style.cursor = 'pointer';
+            remove.setAttribute('role', 'button');
+            remove.setAttribute('aria-label', `Remove ${key} filter`);
+            remove.addEventListener('click', () => this.removeFilter(key));
+            badge.appendChild(remove);
+            wrapper.appendChild(badge);
         });
-        
-        html += `
-            <button class="btn btn-sm btn-outline-secondary" onclick="window.modernFilterSystem.clearAllFilters()">
-                <i class="bi bi-x-circle"></i> Clear All
-            </button>
-        `;
-        html += '</div>';
-        
-        filtersContainer.innerHTML = html;
+
+        const clearButton = document.createElement('button');
+        clearButton.className = 'btn btn-sm btn-outline-secondary';
+        clearButton.type = 'button';
+        clearButton.textContent = 'Clear All';
+        clearButton.addEventListener('click', () => this.clearAllFilters());
+        wrapper.appendChild(clearButton);
+        filtersContainer.replaceChildren(wrapper);
     }
     
     updateFilterButtonText(filterType) {
@@ -1267,15 +1306,7 @@ class ModernFilterSystem {
     
     // Utility functions
     escapeHtml(text) {
-        if (!text) return '';
-        const map = {
-            '&': '&amp;',
-            '<': '&lt;',
-            '>': '&gt;',
-            '"': '&quot;',
-            "'": '&#039;'
-        };
-        return text.replace(/[&<>"']/g, function(m) { return map[m]; });
+        return window.SafeDOM.escapeHtml(text);
     }
     
     formatDate(dateString) {
@@ -1388,10 +1419,10 @@ class ModernFilterSystem {
             const summaryList = analysisSection.querySelector('#analysis-summary');
             if (summaryList) {
                 summaryList.innerHTML = `
-                    <li>Total feedback items: ${analysisData.total_items || 0}</li>
-                    <li>Unique requests: ${analysisData.unique_requests || 0}</li>
-                    <li>Repeating clusters: ${analysisData.cluster_count || 0}</li>
-                    <li>Repetition rate: ${analysisData.repetition_rate || 0}%</li>
+                    <li>Total feedback items: ${window.SafeDOM.finiteNumber(analysisData.total_items)}</li>
+                    <li>Unique requests: ${window.SafeDOM.finiteNumber(analysisData.unique_requests)}</li>
+                    <li>Repeating clusters: ${window.SafeDOM.finiteNumber(analysisData.cluster_count)}</li>
+                    <li>Repetition rate: ${window.SafeDOM.finiteNumber(analysisData.repetition_rate)}%</li>
                 `;
             }
             
@@ -1400,8 +1431,8 @@ class ModernFilterSystem {
             if (topRequestsDiv && analysisData.top_repeating_requests) {
                 const topRequestsHtml = analysisData.top_repeating_requests.slice(0, 3).map(req => `
                     <div class="mb-2">
-                        <strong>${req.count}x:</strong> ${req.summary}
-                        <br><small class="text-muted">Audiences: ${req.audiences ? req.audiences.join(', ') : 'N/A'} | Sources: ${req.sources ? req.sources.join(', ') : 'N/A'}</small>
+                        <strong>${window.SafeDOM.finiteNumber(req.count)}x:</strong> ${this.escapeHtml(req.summary)}
+                        <br><small class="text-muted">Audiences: ${this.escapeHtml(req.audiences ? req.audiences.join(', ') : 'N/A')} | Sources: ${this.escapeHtml(req.sources ? req.sources.join(', ') : 'N/A')}</small>
                     </div>
                 `).join('');
                 topRequestsDiv.innerHTML = topRequestsHtml;

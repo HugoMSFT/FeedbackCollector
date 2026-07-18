@@ -12,6 +12,10 @@ class EnhancedCollectionManager {
             errors: []
         };
         this.eventSource = null;
+        this.operationId = null;
+        this.activeOperationType = null;
+        this.fabricLogCursor = 0;
+        this.fabricConnected = false;
         this.init();
     }
     
@@ -32,17 +36,24 @@ class EnhancedCollectionManager {
         if (fabricButton) {
             fabricButton.addEventListener('click', () => this.writeToFabric());
         }
+
+        const connectButton = document.getElementById('connectFabricBtn');
+        if (connectButton) {
+            connectButton.addEventListener('click', () => this.connectToFabric());
+        }
         
         // Progress drawer close
         const closeDrawer = document.getElementById('closeCollectionDrawer');
         if (closeDrawer) {
             closeDrawer.addEventListener('click', () => this.hideProgress());
         }
+
+        this.refreshFabricStatus();
     }
     
     async startCollection() {
-        if (this.isCollecting) {
-            this.showAlert('Collection already in progress', 'warning');
+        if (this.isCollecting || this.activeOperationType) {
+            this.showAlert('Wait for the active operation to finish before collecting.', 'warning');
             return;
         }
         
@@ -100,15 +111,6 @@ class EnhancedCollectionManager {
         this.showProgress();
         
         try {
-            // Start server-sent events for real-time updates
-            this.startProgressTracking();
-            
-            // Aggressive reset after starting SSE to override any initial stale data
-            setTimeout(() => {
-                this.resetProgressDisplays();
-                console.log('✅ Post-SSE reset completed to override any stale server data');
-            }, 200);
-            
             // Send collection request. The server now runs the scrape on a
             // background thread and returns 202 immediately - progress and
             // the final result arrive over the SSE stream.
@@ -122,6 +124,12 @@ class EnhancedCollectionManager {
 
             // 202 Accepted = collection running on the server; we wait for SSE.
             if (response.status === 202) {
+                const result = await response.json();
+                this.operationId = result.operation_id;
+                this.activeOperationType = 'collection';
+                this.collectionStatus.operation_id = result.operation_id;
+                window.collectionOperationId = result.operation_id;
+                this.startProgressTracking();
                 console.log('Collection accepted, awaiting SSE completion');
                 return;
             }
@@ -142,6 +150,11 @@ class EnhancedCollectionManager {
             const result = await response.json();
             if (result && result.status === 'started') {
                 // Background mode; SSE will deliver completion.
+                this.operationId = result.operation_id;
+                this.activeOperationType = 'collection';
+                this.collectionStatus.operation_id = result.operation_id;
+                window.collectionOperationId = result.operation_id;
+                this.startProgressTracking();
                 return;
             }
             this.handleCollectionComplete(result);
@@ -262,6 +275,22 @@ class EnhancedCollectionManager {
                 this.eventSource.close();
                 this.eventSource = null;
             }
+        } else if (data.status === 'cancelled') {
+            this.isCollecting = false;
+            this.activeOperationType = null;
+            this.collectionStatus.message = data.message || 'Collection cancelled';
+            this.updateProgressUI();
+            this.updateUI();
+
+            if (window.badgeStateManager) {
+                window.badgeStateManager.setCollectionProgressState('cancelled', 'Cancelled', 0);
+            }
+            this.showAlert(this.collectionStatus.message, 'warning');
+
+            if (this.eventSource) {
+                this.eventSource.close();
+                this.eventSource = null;
+            }
         }
     }
 
@@ -283,6 +312,7 @@ class EnhancedCollectionManager {
 
     handleCollectionComplete(result) {
         this.isCollecting = false;
+        this.activeOperationType = null;
         
         // Update source counts from final results
         this.collectionStatus.source_counts = this.collectionStatus.source_counts || {};
@@ -337,6 +367,7 @@ class EnhancedCollectionManager {
     
     handleCollectionError(error) {
         this.isCollecting = false;
+        this.activeOperationType = null;
         this.collectionStatus.status = 'error';
         this.collectionStatus.errors.push(error.message);
         
@@ -358,12 +389,20 @@ class EnhancedCollectionManager {
     updateUI() {
         const collectButton = document.getElementById('collectFeedbackBtn');
         const progressBadge = document.getElementById('progressBadge');
+        const operationActive = Boolean(
+            this.isCollecting || this.activeOperationType
+        );
         
         if (collectButton) {
-            collectButton.disabled = this.isCollecting;
+            collectButton.disabled = operationActive;
             collectButton.innerHTML = this.isCollecting ? 
                 `<span class="fluent-progress-ring"></span> Collecting...` : 
                 `<i class="bi bi-search"></i> Collect Feedback Now`;
+        }
+
+        const writeButton = document.getElementById('writeToFabricBtn');
+        if (writeButton) {
+            writeButton.disabled = operationActive || !this.fabricConnected;
         }
         
         // Only update progress badge during active collection
@@ -427,7 +466,7 @@ class EnhancedCollectionManager {
      * Render the per-source status list inside #sourceStatusList.
      * Driven entirely by ``collection_status.source_states`` (a dict of
      * {key: {label, state, count, message}}). States: pending / running /
-     * success / error / skipped.
+     * success / error / skipped / cancelled.
      */
     renderSourceStatusList() {
         const container = document.getElementById('sourceStatusList');
@@ -461,12 +500,13 @@ class EnhancedCollectionManager {
                 success:  { icon: 'bi-check-circle-fill', cls: 'text-success',  badge: 'bg-success',    text: 'Success' },
                 error:    { icon: 'bi-x-circle-fill',     cls: 'text-danger',   badge: 'bg-danger',     text: 'Error' },
                 skipped:  { icon: 'bi-slash-circle',      cls: 'text-warning',  badge: 'bg-warning text-dark', text: 'Skipped' },
+                cancelled:{ icon: 'bi-stop-circle',       cls: 'text-secondary',badge: 'bg-secondary',  text: 'Cancelled' },
             };
             const meta = stateMap[state] || stateMap.pending;
             const spinning = state === 'running' ? ' style="animation: spin 1s linear infinite;"' : '';
 
             const countBadge = (count !== undefined && count !== null && state !== 'pending')
-                ? `<span class="badge bg-light text-dark border ms-2">${count} items</span>`
+                ? `<span class="badge bg-light text-dark border ms-2">${window.SafeDOM.finiteNumber(count)} items</span>`
                 : '';
 
             return `
@@ -492,7 +532,7 @@ class EnhancedCollectionManager {
             .join('');
 
         // Summary line: "2/5 done · 1 running"
-        let done = 0, running = 0, pending = 0, errored = 0, skipped = 0;
+        let done = 0, running = 0, pending = 0, errored = 0, skipped = 0, cancelled = 0;
         Object.values(states).forEach(s => {
             switch (s.state) {
                 case 'success': done++; break;
@@ -500,6 +540,7 @@ class EnhancedCollectionManager {
                 case 'pending': pending++; break;
                 case 'error':   errored++; break;
                 case 'skipped': skipped++; break;
+                case 'cancelled': cancelled++; break;
             }
         });
         const total = Object.keys(states).length;
@@ -510,16 +551,13 @@ class EnhancedCollectionManager {
             if (pending) parts.push(`${pending} pending`);
             if (errored) parts.push(`${errored} error`);
             if (skipped) parts.push(`${skipped} skipped`);
+            if (cancelled) parts.push(`${cancelled} cancelled`);
             summary.textContent = parts.join(' · ');
         }
     }
 
     _escape(s) {
-        return String(s == null ? '' : s)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;');
+        return window.SafeDOM.escapeHtml(s);
     }
     
     resetProgressDisplays() {
@@ -563,16 +601,19 @@ class EnhancedCollectionManager {
     updateSourceInfo(results) {
         // Update the "last collected" info in source cards
         Object.entries(results).forEach(([source, data]) => {
-            const sourceCard = document.querySelector(`[data-source="${source}"]`);
+            const sourceCard = document.querySelector(
+                `[data-source="${window.SafeDOM.cssEscape(source)}"]`
+            );
             if (sourceCard) {
                 const infoElement = sourceCard.querySelector('.source-info');
                 if (infoElement) {
                     const now = new Date().toLocaleString();
-                    const count = data.count || 0;
-                    infoElement.innerHTML = `
-                        <span>Last collected: ${now}</span>
-                        <span>Items found: ${count}</span>
-                    `;
+                    const count = window.SafeDOM.finiteNumber(data.count);
+                    const collected = document.createElement('span');
+                    collected.textContent = `Last collected: ${now}`;
+                    const found = document.createElement('span');
+                    found.textContent = `Items found: ${count}`;
+                    infoElement.replaceChildren(collected, found);
                 }
             }
         });
@@ -617,9 +658,13 @@ class EnhancedCollectionManager {
         Object.entries(results).forEach(([source, data]) => {
             if (source === 'total' || source === 'csv_filename') return; // Skip total and filename
             
-            const count = (typeof data === 'object' && data.count !== undefined) ? data.count : (typeof data === 'number' ? data : 0);
+            const count = window.SafeDOM.finiteNumber(
+                (typeof data === 'object' && data.count !== undefined)
+                    ? data.count
+                    : (typeof data === 'number' ? data : 0)
+            );
             totalItems += count;
-            html += `${this.getSourceDisplayName(source)}: ${count} items<br>`;
+            html += `${this._escape(this.getSourceDisplayName(source))}: ${count} items<br>`;
         });
         
         html += `<strong>Total: ${totalItems} items</strong>`;
@@ -627,35 +672,200 @@ class EnhancedCollectionManager {
         
         // Add download link
         if (results.csv_filename) {
+            const downloadUrl = window.SafeDOM.safeUrl(
+                `/data/${encodeURIComponent(String(results.csv_filename))}`
+            );
+            if (downloadUrl) {
             html += `<div class="mt-3">
-                <a href="/data/${results.csv_filename}" class="fluent-button fluent-button-secondary" download>
+                <a href="${this._escape(downloadUrl)}" class="fluent-button fluent-button-secondary" download>
                     <i class="bi bi-download"></i> Download CSV
                 </a>
             </div>`;
+            }
         }
         
         resultsDiv.innerHTML = html;
     }
     
-    async writeToFabric() {
+    async connectToFabric() {
+        const tokenInput = document.getElementById('fabricAuthToken');
+        const token = tokenInput?.value.trim();
+        if (!token) {
+            this.showAlert('Enter a Fabric token first.', 'warning');
+            return;
+        }
+
+        const connectButton = document.getElementById('connectFabricBtn');
+        if (connectButton) connectButton.disabled = true;
         try {
-            const response = await fetch('/api/write-to-fabric', {
+            const response = await fetch('/api/fabric/token/validate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token })
+            });
+            const result = await response.json();
+            if (!response.ok || result.status !== 'success') {
+                throw new Error(result.message || `HTTP ${response.status}`);
+            }
+
+            tokenInput.value = '';
+            this.setFabricConnectionState(true);
+            this.showAlert('Fabric connection validated.', 'success');
+        } catch (error) {
+            this.setFabricConnectionState(false);
+            this.showAlert(`Fabric connection failed: ${error.message}`, 'error');
+        } finally {
+            if (connectButton) connectButton.disabled = false;
+        }
+    }
+
+    async refreshFabricStatus() {
+        try {
+            const response = await fetch('/api/fabric/token/status');
+            if (!response.ok) return;
+            const result = await response.json();
+            this.setFabricConnectionState(Boolean(result.has_token));
+        } catch (error) {
+            console.debug('Unable to read Fabric token status:', error);
+        }
+    }
+
+    setFabricConnectionState(connected) {
+        this.fabricConnected = connected;
+        const badge = document.getElementById('fabricAuthBadge');
+        if (badge) {
+            badge.textContent = connected ? 'Connected' : 'Not Connected';
+            badge.className = connected
+                ? 'fluent-badge fluent-badge-success'
+                : 'fluent-badge fluent-badge-secondary';
+        }
+        this.updateUI();
+        if (window.badgeStateManager) {
+            window.badgeStateManager.setFabricAuthState(
+                connected ? 'connected' : 'disconnected',
+                connected ? 'Connected' : 'Not Connected'
+            );
+        }
+    }
+
+    async writeToFabric() {
+        if (this.isCollecting || this.activeOperationType) {
+            this.showAlert('Wait for the active operation to finish before writing to Fabric.', 'warning');
+            return;
+        }
+
+        this.activeOperationType = 'fabric-pending';
+        this.updateUI();
+        try {
+            const response = await fetch('/api/write_to_fabric_async', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                }
+                },
+                body: JSON.stringify({})
             });
-            
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-            
             const result = await response.json();
-            this.showFabricResults(result);
-            
+            if (!response.ok) {
+                throw new Error(result.message || `HTTP ${response.status}`);
+            }
+            if (!result.operation_id) {
+                this.activeOperationType = null;
+                this.updateUI();
+                this.showAlert(result.message || 'No feedback items were eligible for writing.', 'warning');
+                return;
+            }
+
+            this.operationId = result.operation_id;
+            this.activeOperationType = 'fabric';
+            this.fabricLogCursor = 0;
+            this.showProgress();
+            this.collectionStatus = {
+                ...this.collectionStatus,
+                status: 'running',
+                progress: 0,
+                current_source: 'Writing to Fabric',
+                message: result.message || 'Fabric write started'
+            };
+            this.updateProgressUI();
+            const cancelButton = document.getElementById('cancelOperation');
+            if (cancelButton) cancelButton.disabled = false;
+            this.pollFabricProgress(result.operation_id);
         } catch (error) {
+            this.activeOperationType = null;
+            this.updateUI();
             this.showAlert(`Fabric write failed: ${error.message}`, 'error');
         }
+    }
+
+    async pollFabricProgress(operationId) {
+        while (this.activeOperationType === 'fabric' && this.operationId === operationId) {
+            try {
+                const response = await fetch(
+                    `/api/fabric_progress/${encodeURIComponent(operationId)}?after=${this.fabricLogCursor}`
+                );
+                const result = await response.json();
+                if (!response.ok) {
+                    throw new Error(result.error || `HTTP ${response.status}`);
+                }
+
+                this.fabricLogCursor = Number(result.next_log_cursor) || this.fabricLogCursor;
+                for (const log of result.logs || []) {
+                    if (typeof window.addCollectionLog === 'function') {
+                        window.addCollectionLog(log.message || '', log.type || 'info');
+                    }
+                }
+                this.collectionStatus.progress = Number(result.progress) || 0;
+                this.collectionStatus.current_source = result.operation || 'Writing to Fabric';
+                this.collectionStatus.message = result.message || 'Writing to Fabric...';
+                this.updateProgressUI();
+
+                if (result.completed) {
+                    this.activeOperationType = null;
+                    this.operationId = null;
+                    this.updateUI();
+                    const cancelButton = document.getElementById('cancelOperation');
+                    if (cancelButton) cancelButton.disabled = true;
+                    this.showFabricResults({
+                        success: Boolean(result.success),
+                        records_written: result.new_items,
+                        table_name: 'Feedback',
+                        message: result.message
+                    });
+                    this.showAlert(
+                        result.message || (result.success ? 'Fabric write completed.' : 'Fabric write failed.'),
+                        result.success ? 'success' : (result.status === 'cancelled' ? 'warning' : 'error')
+                    );
+                    return;
+                }
+            } catch (error) {
+                this.activeOperationType = null;
+                this.operationId = null;
+                this.updateUI();
+                this.showAlert(`Fabric progress failed: ${error.message}`, 'error');
+                return;
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+    }
+
+    async cancelActiveOperation() {
+        if (!this.operationId || !this.activeOperationType) {
+            this.showAlert('No cancellable operation is running.', 'warning');
+            return;
+        }
+
+        const operationId = this.operationId;
+        const endpoint = this.activeOperationType === 'fabric'
+            ? `/api/cancel_fabric_write/${encodeURIComponent(operationId)}`
+            : `/api/collection/${encodeURIComponent(operationId)}/cancel`;
+        const response = await fetch(endpoint, { method: 'POST' });
+        const result = await response.json();
+        if (!response.ok) {
+            throw new Error(result.message || result.error || `HTTP ${response.status}`);
+        }
+        this.collectionStatus.message = result.message || 'Cancellation requested...';
+        this.updateProgressUI();
     }
     
     showFabricResults(result) {
@@ -668,8 +878,8 @@ class EnhancedCollectionManager {
                     <i class="bi bi-check-circle"></i>
                     <div>
                         <strong>Successfully written to Fabric!</strong><br>
-                        Records written: ${result.records_written || 'Unknown'}<br>
-                        Table: ${result.table_name || 'Unknown'}
+                        Records written: ${this._escape(result.records_written || 'Unknown')}<br>
+                        Table: ${this._escape(result.table_name || 'Unknown')}
                     </div>
                 </div>
             `;
@@ -679,7 +889,7 @@ class EnhancedCollectionManager {
                     <i class="bi bi-exclamation-triangle"></i>
                     <div>
                         <strong>Failed to write to Fabric</strong><br>
-                        ${result.message || 'Unknown error'}
+                        ${this._escape(result.message || 'Unknown error')}
                     </div>
                 </div>
             `;
@@ -688,11 +898,14 @@ class EnhancedCollectionManager {
     
     showAlert(message, type = 'info') {
         const alertDiv = document.createElement('div');
-        alertDiv.className = `fluent-alert fluent-alert-${type}`;
-        alertDiv.innerHTML = `
-            <i class="bi bi-${this.getAlertIcon(type)}"></i>
-            <div>${message}</div>
-        `;
+        const allowedTypes = new Set(['info', 'success', 'warning', 'error']);
+        const safeType = allowedTypes.has(type) ? type : 'info';
+        alertDiv.className = `fluent-alert fluent-alert-${safeType}`;
+        const icon = document.createElement('i');
+        icon.className = `bi bi-${this.getAlertIcon(safeType)}`;
+        const body = document.createElement('div');
+        body.textContent = String(message ?? '');
+        alertDiv.append(icon, body);
         
         // Insert at the top of the main container
         // Try .app-main first (new layout), then .fluent-container (legacy), then body

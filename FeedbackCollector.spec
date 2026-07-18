@@ -16,12 +16,6 @@ datas = [
     (str(src_dir / 'keywords.json'), 'src'),
 ]
 
-for env_candidate in [project_root / '.env', src_dir / '.env']:
-    if env_candidate.exists():
-        datas.append((str(env_candidate), '.'))
-        break
-
-
 def available_hiddenimports(*modules):
     return [module for module in modules if importlib.util.find_spec(module) is not None]
 
@@ -52,6 +46,9 @@ a = Analysis(
         'ado_client',
         'local_store',
         'runtime_paths',
+        'app_security',
+        'job_manager',
+        'http_client',
     ],
     hookspath=[],
     hooksconfig={},

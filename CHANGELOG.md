@@ -5,6 +5,27 @@ All notable changes to the Microsoft Fabric Workloads Feedback Collector project
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Loopback-first request security, authenticated HTTPS-only remote access, and
+  an expiring server-side Fabric token vault.
+- SQLite schema migrations, durable Fabric jobs, cooperative cancellation,
+  retrying HTTP clients, and comprehensive route/security/persistence tests.
+- Windows and Linux CI for Python 3.10 and 3.12.
+
+### Changed
+- Local SQLite is now authoritative for feedback editing; Fabric SQL is an
+  optional token-authenticated synchronization target.
+- Collection workers use request snapshots and no longer depend on Flask
+  request context.
+- Runtime and build dependencies are pinned, and packaged builds exclude
+  `.env`.
+
+### Removed
+- Legacy interactive Fabric authentication, Livy/PySpark writers, placeholder
+  MCP success paths, and stale generated reports.
+
 ## [4.1.0] - 2025-07-17
 
 ### Fixed

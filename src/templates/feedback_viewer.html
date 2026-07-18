@@ -699,6 +699,8 @@
         }
     </style>
     
+    <script src="{{ url_for('static', filename='js/safe-dom.js') }}"></script>
+
     <!-- Badge State Manager -->
     <script src="{{ url_for('static', filename='js/badge-state-manager.js') }}"></script>
     
@@ -1223,7 +1225,7 @@
                                     <a href="{{ url_for('index') }}" class="fluent-button fluent-button-primary me-md-2" style="min-height: 40px; padding: 0 24px;">
                                         🔄 Collect New Feedback
                                     </a>
-                                    {% if stored_token %}
+                                    {% if has_fabric_token %}
                                     <button class="fluent-button fluent-button-secondary" onclick="loadFromFabricSQL()" style="min-height: 40px; padding: 0 24px;">
                                         📊 Load from Fabric SQL
                                     </button>
@@ -1272,8 +1274,10 @@
                             <div class="category-info mb-3">
                                 <div class="d-flex flex-wrap align-items-center gap-2">
                                     {% if item.Audience and item.Audience|trim != '' %}
-                                        <span class="audience-badge audience-{{ item.Audience|lower }}"
-                                              onclick="updateAudience('{{ item.Feedback_ID or '' }}', '{{ item.Audience }}')"
+                                        <span class="audience-badge audience-{{ item.Audience|safe_class_token }}"
+                                              data-feedback-id="{{ item.Feedback_ID or '' }}"
+                                              data-audience="{{ item.Audience or '' }}"
+                                              onclick="updateAudienceFromElement(this)"
                                               title="Click to update audience"
                                               style="cursor: pointer;">
                                             {% if item.Audience == 'Developer' %}🛠️ Developer
@@ -1284,7 +1288,7 @@
                                     {% endif %}
                                     
                                     {% if item.Priority and item.Priority|trim != '' %}
-                                        <span class="priority-badge priority-{{ item.Priority|lower }}" title="Priority: {{ item.Priority|title }}">
+                                        <span class="priority-badge priority-{{ item.Priority|safe_class_token }}" title="Priority: {{ item.Priority|title }}">
                                             {% if item.Priority|lower == 'critical' %}🔴 Critical
                                             {% elif item.Priority|lower == 'high' %}🟠 High
                                             {% elif item.Priority|lower == 'medium' %}🟡 Medium
@@ -1294,7 +1298,7 @@
                                    {% endif %}
                                    
                                    <!-- State Badge (clickable) with dropdown inside -->
-                                   <span class="state-badge state-{{ (item.State or 'NEW')|lower }}"
+                                   <span class="state-badge state-{{ (item.State or 'NEW')|safe_class_token }}"
                                          data-feedback-id="{{ item.Feedback_ID or '' }}"
                                          data-current-state="{{ item.State or 'NEW' }}"
                                          onclick="toggleStateDropdown(this, event)"
@@ -1384,8 +1388,9 @@
                                 {{ item.Feedback }}
                             </p>
                             <div class="mt-auto pt-3 d-flex align-items-center flex-wrap gap-2"> {# Push button to bottom #}
-                                {% if item.Url and item.Url|trim != '' %}
-                                    <a href="{{ item.Url }}" class="fluent-button fluent-button-secondary" target="_blank" rel="noopener noreferrer" style="min-height: 32px; padding: 4px 12px;">View Source</a>
+                                {% set safe_item_url = item.Url|safe_external_url %}
+                                {% if safe_item_url %}
+                                    <a href="{{ safe_item_url }}" class="fluent-button fluent-button-secondary" target="_blank" rel="noopener noreferrer" style="min-height: 32px; padding: 4px 12px;">View Source</a>
                                 {% endif %}
                                 {% if item.Tag and item.Tag|trim != '' %}
                                     <span class="fluent-badge fluent-badge-secondary" title="Source Tag: {{ item.Tag }}"><i class="bi bi-tag-fill me-1"></i>{{ item.Tag }}</span>
@@ -1424,8 +1429,9 @@
     </div> <!-- End of container-custom -->
     <script>
         // Global variables
-        let bearerToken = null;
-        let stateManagementEnabled = false;
+        let hasFabricToken = {{ has_fabric_token|tojson }};
+        // Local SQLite editing is always available; Fabric is an optional sync target.
+        let stateManagementEnabled = true;
         let cachedStateChanges = {};
         let hasUnsavedChanges = false;
         let fabricConnected = false;
@@ -1448,101 +1454,27 @@
             console.log('🔧 Modern Filter System initialized');
         });
         
-        // Override any existing updateDomain function with fixed version
-        function updateDomain(feedbackId, currentDomain) {
-            console.log(`🏷️ Domain update requested: ${feedbackId} → current: ${currentDomain}`);
-            
-            // Check if state management is enabled (allow if we have state data or URL parameter indicates connection)
-            const urlParams = new URLSearchParams(window.location.search);
-            const hasStateData = window.fabricStateData && Object.keys(window.fabricStateData).length > 0;
-            const urlIndicatesConnection = urlParams.get('fabric_connected') === 'true';
-            
-            console.log('🔍 Connection check:', {
-                stateManagementEnabled,
-                hasStateData: !!hasStateData,
-                urlIndicatesConnection,
-                fabricConnected
-            });
-            
-            // Allow if ANY connection indicator is present
-            if (!stateManagementEnabled && !hasStateData && !urlIndicatesConnection && !fabricConnected) {
-                console.log('❌ No connection indicators found - showing alert');
-                alert('Please click "Sync with Fabric" first to connect to the SQL database and enable state management.');
-                return;
-            }
-            
-            console.log('✅ Connection check passed - showing domain dropdown');
-            // Create domain dropdown
-            showDomainDropdown(feedbackId, currentDomain);
-        }
-        
-        // Override any existing updateNotes function
-        function updateNotes(feedbackId, currentNotes) {
-            console.log(`📝 Notes update requested: ${feedbackId}`);
-            
-            // Same connection check as domain update
-            const urlParams = new URLSearchParams(window.location.search);
-            const hasStateData = window.fabricStateData && Object.keys(window.fabricStateData).length > 0;
-            const urlIndicatesConnection = urlParams.get('fabric_connected') === 'true';
-            
-            if (!stateManagementEnabled && !hasStateData && !urlIndicatesConnection && !fabricConnected) {
-                alert('Please click "Sync with Fabric" first to connect to the SQL database and enable state management.');
-                return;
-            }
-            
-            // Simple prompt for notes (can be enhanced later)
-            const newNotes = prompt('Enter notes for this feedback:', currentNotes || '');
-            if (newNotes !== null) {
-                // Save notes to database
-                console.log(`💾 Saving notes for ${feedbackId}: ${newNotes}`);
-                
-                fetch('/api/feedback/notes', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        feedback_id: feedbackId,
-                        notes: newNotes
-                    })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.status === 'success') {
-                        console.log('✅ Notes updated successfully');
-                        // Update the UI immediately
-                        updateNotesDisplay(feedbackId, newNotes);
-                        // Show success message
-                        showToastMessage('Notes updated successfully', 'success');
-                        // Reload page to reflect changes
-                        setTimeout(() => window.location.reload(), 1000);
-                    } else {
-                        console.error('❌ Error updating notes:', data.message);
-                        alert('Error updating notes: ' + data.message);
-                    }
-                })
-                .catch(error => {
-                    console.error('❌ Network error updating notes:', error);
-                    alert('Network error updating notes. Please try again.');
-                });
-            }
-        }
-        
         // Helper function to show toast messages
         function showToastMessage(message, type = 'info') {
-            // Create toast element
             const toast = document.createElement('div');
             const alertType = type === 'danger' ? 'error' : type;
             toast.className = `fluent-alert fluent-alert-${alertType} position-fixed`;
             toast.style.cssText = 'top: 20px; right: 20px; z-index: 9999; min-width: 300px; box-shadow: var(--shadow-depth-16);';
-            toast.innerHTML = `
-                <div class="d-flex align-items-center justify-content-between w-100">
-                    <div>${message}</div>
-                    <button type="button" class="fluent-button-icon" onclick="this.closest('.fluent-alert').remove()">
-                        <i class="bi bi-x-lg"></i>
-                    </button>
-                </div>
-            `;
+
+            const content = document.createElement('div');
+            content.className = 'd-flex align-items-center justify-content-between w-100';
+            const messageElement = document.createElement('div');
+            messageElement.textContent = String(message ?? '');
+            const closeButton = document.createElement('button');
+            closeButton.type = 'button';
+            closeButton.className = 'fluent-button-icon';
+            closeButton.setAttribute('aria-label', 'Close');
+            const closeIcon = document.createElement('i');
+            closeIcon.className = 'bi bi-x-lg';
+            closeButton.appendChild(closeIcon);
+            closeButton.addEventListener('click', () => toast.remove());
+            content.append(messageElement, closeButton);
+            toast.appendChild(content);
             
             // Add to page
             document.body.appendChild(toast);
@@ -1558,7 +1490,7 @@
         // Helper function to update notes display in UI
         function updateNotesDisplay(feedbackId, notes) {
             // Find the feedback card and update notes display
-            const stateBadge = document.querySelector(`[data-feedback-id="${feedbackId}"][data-current-state]`);
+            const stateBadge = document.querySelector(`[data-feedback-id="${SafeDOM.cssEscape(feedbackId)}"][data-current-state]`);
             const card = stateBadge ? stateBadge.closest('.fluent-card-body') : null;
             
             if (card) {
@@ -1579,7 +1511,7 @@
                             card.appendChild(notesDisplay);
                         }
                     }
-                    notesDisplay.innerHTML = `📝 ${notes}`;
+                    notesDisplay.textContent = `📝 ${notes}`;
                 } else if (notesDisplay) {
                     // Remove notes display if notes are empty
                     notesDisplay.remove();
@@ -1587,150 +1519,59 @@
             }
         }
         
-        // Preserve connection state in localStorage
-        function saveFabricConnectionState() {
-            localStorage.setItem('fabricConnected', fabricConnected);
-            localStorage.setItem('stateManagementEnabled', stateManagementEnabled);
-            localStorage.setItem('fabricDataSynced', 'true'); // Mark that actual data sync completed
-        }
-        
         function loadFabricConnectionState() {
-            // IMPROVED: Check backend session state via API instead of relying only on localStorage
-            console.log('🔄 Checking backend session state via API');
-            
-            // Call API to check session state
-            fetch('/api/session_state')
-                .then(response => response.json())
-                .then(sessionData => {
-                    console.log('📡 Backend session state:', sessionData);
-                    
-                    // Enable state management if backend confirms Fabric SQL connection OR bearer token
-                    if (sessionData.fabric_sql_connected || sessionData.has_bearer_token) {
-                        console.log('🔑 Backend confirms Fabric connection - enabling state management');
-                        fabricConnected = true;
-                        window.fabricConnected = true;
-                        stateManagementEnabled = true;
-                        window.stateManagementEnabled = true;
-                        
-                        // Update UI to reflect connected state
-                        if (document.body && document.body.classList) {
-                            document.body.classList.remove('state-management-disabled');
-                        }
-                        
-                        // Update connection UI elements
-                        updateConnectionUI();
-                        
-                        // Hide token banner since connection is established
-                        const tokenBanner = document.getElementById('tokenBanner');
-                        if (tokenBanner && tokenBanner.classList) {
-                            tokenBanner.classList.add('hidden');
-                        }
-                        
-                        console.log('✅ Fabric connection state restored from backend session');
-                    } else {
-                        console.log('ℹ️ No backend Fabric connection found - state management disabled');
-                        fabricConnected = false;
-                        stateManagementEnabled = false;
-                        
-                        // Clear any stale localStorage
-                        localStorage.removeItem('fabricConnected');
-                        localStorage.removeItem('stateManagementEnabled');
-                        localStorage.removeItem('fabricDataSynced');
+            fetch('/api/fabric/token/status')
+                .then(response => response.json().then(data => ({ response, data })))
+                .then(({ response, data }) => {
+                    if (!response.ok) {
+                        throw new Error(data.message || 'Unable to read Fabric token status');
                     }
+                    hasFabricToken = Boolean(data.has_token);
+                    fabricConnected = hasFabricToken;
+                    window.fabricConnected = fabricConnected;
+                    updateConnectionUI();
                 })
                 .catch(error => {
-                    console.error('❌ Error checking backend session state:', error);
-                    console.log('ℹ️ Falling back to template variables for connection state');
-                    
-                    // Fallback to template-based detection
-                    const sessionToken = '{{ stored_token or "" }}';
-                    const fabricSqlConnected = '{{ fabric_sql_connected|lower }}' === 'true';
-                    
-                    if (fabricSqlConnected || (sessionToken && sessionToken.trim() !== '' && sessionToken !== 'None')) {
-                        console.log('🎯 Template confirms Fabric connection - enabling state management');
-                        fabricConnected = true;
-                        window.fabricConnected = true;
-                        stateManagementEnabled = true;
-                        window.stateManagementEnabled = true;
-                        
-                        if (document.body && document.body.classList) {
-                            document.body.classList.remove('state-management-disabled');
-                        }
-                        
-                        updateConnectionUI();
-                    }
+                    fabricConnected = Boolean(hasFabricToken);
+                    window.fabricConnected = fabricConnected;
+                    updateConnectionUI();
+                    console.error('Unable to refresh Fabric connection state:', error);
                 });
         }
         
         function updateConnectionUI() {
-            // Try multiple times with delays to handle DOM loading
-            let attempts = 0;
-            const maxAttempts = 10;
-            
-            function tryUpdate() {
-                attempts++;
-                const syncBtn = document.getElementById('fabricSyncBtn');
-                const badge = document.getElementById('fabricSyncBadge');
-                
-                console.log(`🔄 Updating connection UI (attempt ${attempts}):`, {
-                    fabricConnected,
-                    syncBtn: !!syncBtn,
-                    badge: !!badge
-                });
-                
-                if (fabricConnected && syncBtn && syncBtn.classList) {
-                    // Update sync button - always use btn-primary styling for consistency
-                    syncBtn.innerHTML = '<i class="bi bi-database me-1"></i>Sync with Fabric <span class="fluent-badge fluent-badge-success ms-1" id="fabricSyncBadge">Connected</span>';
-                    syncBtn.className = 'fluent-button fluent-button-primary ms-2'; // Force btn-primary styling
-                    console.log('✅ Updated sync button to connected state with btn-primary styling');
-                    
-                    // Badge is now handled inline in the button text above
-                    console.log('✅ Badge included inline in button text');
-                    
-                    // Enable state management (critical - must work even without badge)
-                    stateManagementEnabled = true;
-                    if (document.body && document.body.classList) {
-                        document.body.classList.remove('state-management-disabled');
-                    }
-                    console.log('✅ State management enabled');
-                    
-                    // Save state for future page loads
-                    saveFabricConnectionState();
-                    
-                } else if (attempts < maxAttempts && fabricConnected) {
-                    // Sync button not found, try again
-                    console.log(`⏳ Sync button not found, retrying in ${50 * attempts}ms...`);
-                    setTimeout(tryUpdate, 50 * attempts);
-                } else if (fabricConnected) {
-                    // Fallback: Enable state management even if UI elements are missing
-                    console.warn('⚠️ Could not find sync button after', maxAttempts, 'attempts');
-                    console.log('🔧 Enabling state management anyway (fallback mode)');
-                    stateManagementEnabled = true;
-                    if (document.body && document.body.classList) {
-                        document.body.classList.remove('state-management-disabled');
-                    }
-                }
+            const syncBtn = document.getElementById('fabricSyncBtn');
+            if (!syncBtn) {
+                return;
             }
-            
-            tryUpdate();
+
+            syncBtn.replaceChildren();
+            const icon = document.createElement('i');
+            icon.className = 'bi bi-database me-1';
+            syncBtn.append(icon, document.createTextNode('Sync with Fabric'));
+            syncBtn.className = 'fluent-button fluent-button-primary ms-2';
+
+            if (fabricConnected) {
+                const badge = document.createElement('span');
+                badge.id = 'fabricSyncBadge';
+                badge.className = 'fluent-badge fluent-badge-success ms-1';
+                badge.textContent = 'Connected';
+                syncBtn.append(document.createTextNode(' '), badge);
+            }
         }
         
         // Check state management initialization
-        const sessionToken = '{{ stored_token or "" }}';  // Bearer token for lakehouse writes
-        const statesLoaded = '{{ states_already_loaded|lower }}' === 'true';  // Based on Fabric SQL connection
-        const fabricSqlConnected = '{{ fabric_sql_connected|lower }}' === 'true';  // Explicit SQL connection state
+        const statesLoaded = {{ states_already_loaded|tojson }};
+        const fabricSqlConnected = {{ fabric_sql_connected|tojson }};
         
         console.log('State management check:', {
-            sessionToken: sessionToken ? 'Present' : 'None', 
+            serverToken: hasFabricToken ? 'Present' : 'None',
             statesLoaded: statesLoaded,
             fabricSqlConnected: fabricSqlConnected
         });
         
-        // Auto-enable state management if Fabric SQL is connected (not based on bearer token)
-        // BALANCED CONNECTION DETECTION: Check both fresh connections and existing sessions
-        // Trust backend session validation while being conservative about false positives
-        const hasValidToken = sessionToken && sessionToken.trim() !== '' && sessionToken !== 'None';
-        const hasUrlConnection = new URLSearchParams(window.location.search).get('fabric_connected') === 'true';
+        // Fabric connectivity is derived only from server-validated token state.
+        const hasValidToken = hasFabricToken;
         
         // BALANCED APPROACH: Enable if backend confirms SQL connection OR fresh connection with token
         // This preserves sessions on refresh while preventing false positives
@@ -1775,7 +1616,8 @@
         } else if (hasValidToken) {
             // Token exists but backend doesn't confirm full connection - limited functionality
             console.log('🔑 Partial connection: Bearer token exists but not fully connected - enabling domain updates only');
-            fabricConnected = false;  // Don't show as fully connected
+            fabricConnected = true;
+            window.fabricConnected = true;
             stateManagementEnabled = true;  // But allow domain updates
             
             // Don't show success message for partial connections
@@ -1784,17 +1626,17 @@
             console.log('🔍 Connection check details:', {
                 fabricSqlConnected: fabricSqlConnected,
                 hasValidToken: hasValidToken,
-                hasUrlConnection: hasUrlConnection,
-                sessionToken: sessionToken ? 'Present' : 'None'
+                serverToken: hasFabricToken ? 'Present' : 'None'
             });
             
             // No valid connection means no Fabric connection
             fabricConnected = false;
-            stateManagementEnabled = false;
+            stateManagementEnabled = true;
+            window.stateManagementEnabled = true;
             
             // Disable state management UI
             if (document.body && document.body.classList) {
-                document.body.classList.add('state-management-disabled');
+                document.body.classList.remove('state-management-disabled');
             }
             
             // Clear any stale localStorage connection flags
@@ -1846,7 +1688,7 @@
             
             // Update state if cached
             if (change.state) {
-                const stateBadge = document.querySelector(`[data-feedback-id="${feedbackId}"][data-current-state]`);
+                const stateBadge = document.querySelector(`[data-feedback-id="${SafeDOM.cssEscape(feedbackId)}"][data-current-state]`);
                 if (stateBadge) {
                     const stateNames = {
                         'NEW': '🆕 New',
@@ -1855,7 +1697,7 @@
                         'IRRELEVANT': '❌ Irrelevant'
                     };
                     stateBadge.textContent = stateNames[change.state] || change.state;
-                    stateBadge.className = `state-badge state-${change.state.toLowerCase()}`;
+                    stateBadge.className = `state-badge state-${SafeDOM.classToken(change.state)}`;
                     stateBadge.setAttribute('data-current-state', change.state);
                     console.log(`✅ Updated state badge for ${feedbackId} to ${change.state}`);
                 }
@@ -1884,7 +1726,7 @@
                 'ANALYTICS': 'Analytics & Reporting'
             };
             
-            const stateBadge = document.querySelector(`[data-feedback-id="${feedbackId}"][data-current-state]`);
+            const stateBadge = document.querySelector(`[data-feedback-id="${SafeDOM.cssEscape(feedbackId)}"][data-current-state]`);
             const card = stateBadge ? stateBadge.closest('.fluent-card-body') : null;
             if (card) {
                 const domainBadges = card.querySelectorAll('.domain-badge');
@@ -1905,10 +1747,8 @@
                 return;
             }
             
-            bearerToken = token;
-            
             // First, store token in session for persistence across navigation
-            fetch('/api/store_session_token', {
+            fetch('/api/fabric/token/validate', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -1918,24 +1758,25 @@
             .then(response => response.json())
             .then(data => {
                 if (data.status === 'success') {
+                    hasFabricToken = true;
+                    document.getElementById('bearerToken').value = '';
                     console.log('🔑 Token stored in session successfully');
                     
-                    // Now load states from Fabric Lakehouse
-                    loadStatesFromFabric(token);
+                    // Now load states from Fabric SQL.
+                    loadStatesFromFabric();
                 } else {
                     alert('Error storing token: ' + data.message);
                 }
             })
             .catch(error => {
                 console.error('Error storing token:', error);
-                // Continue with state loading even if session storage fails
-                loadStatesFromFabric(token);
+                alert('Unable to store the Fabric token.');
             });
         });
         }
         
-        // Load actual states from Fabric Lakehouse
-        function loadStatesFromFabric(token) {
+        // Load states from Fabric SQL.
+        function loadStatesFromFabric() {
             // Get all feedback IDs from the page
             const feedbackIds = [];
             document.querySelectorAll('[data-feedback-id]').forEach(element => {
@@ -1954,14 +1795,13 @@
             const loadingMsg = document.createElement('div');
             loadingMsg.id = 'loadingMsg';
             loadingMsg.className = 'alert alert-info';
-            loadingMsg.innerHTML = '🔄 Loading states from Fabric Lakehouse...';
+            loadingMsg.textContent = '🔄 Loading states from Fabric SQL...';
             document.querySelector('.fluent-container').insertBefore(loadingMsg, document.querySelector('#filter-section-container'));
             
             fetch('/api/feedback/states/load', {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': token
+                    'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
                     feedback_ids: feedbackIds
@@ -1982,7 +1822,7 @@
                     // Show success message
                     const successMsg = document.createElement('div');
                     successMsg.className = 'alert alert-success';
-                    successMsg.innerHTML = `✅ Loaded ${Object.keys(data.states).length} feedback states from Fabric Lakehouse`;
+                    successMsg.textContent = `✅ Loaded ${Object.keys(data.states).length} feedback states from Fabric SQL`;
                     document.querySelector('.fluent-container').insertBefore(successMsg, document.querySelector('#filter-section-container'));
                     setTimeout(() => successMsg.remove(), 5000);
                 } else {
@@ -2006,7 +1846,7 @@
                 const stateData = fabricStates[feedbackId];
                 
                 // Update state badge
-                const stateBadge = document.querySelector(`[data-feedback-id="${feedbackId}"][data-current-state]`);
+                const stateBadge = document.querySelector(`[data-feedback-id="${SafeDOM.cssEscape(feedbackId)}"][data-current-state]`);
                 if (stateBadge) {
                     const stateNames = {
                         'NEW': '🆕 New',
@@ -2016,7 +1856,7 @@
                     };
                     
                     stateBadge.textContent = stateNames[stateData.State] || stateData.State;
-                    stateBadge.className = `state-badge state-${stateData.State.toLowerCase()}`;
+                    stateBadge.className = `state-badge state-${SafeDOM.classToken(stateData.State)}`;
                     stateBadge.setAttribute('data-current-state', stateData.State);
                 }
                 
@@ -2035,7 +1875,7 @@
                                 stateSection.parentNode.insertBefore(notesDisplay, stateSection.nextSibling);
                             }
                         }
-                        notesDisplay.innerHTML = `📝 ${stateData.Feedback_Notes}`;
+                        notesDisplay.textContent = `📝 ${stateData.Feedback_Notes}`;
                     }
                 }
             });
@@ -2058,16 +1898,38 @@
         // Load cached changes from localStorage
         function loadCachedChanges() {
             const cached = localStorage.getItem('feedbackStateChanges');
-            if (!cachedStateChanges[feedbackId]) {
-                cachedStateChanges[feedbackId] = {};
+            if (!cached) {
+                return;
             }
-            
-            Object.assign(cachedStateChanges[feedbackId], changeData);
-            cachedStateChanges[feedbackId].feedback_id = feedbackId;
-            
-            // Save to localStorage
+
+            try {
+                const parsed = JSON.parse(cached);
+                if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                    throw new Error('Cached state changes must be an object');
+                }
+                cachedStateChanges = parsed;
+                hasUnsavedChanges = Object.keys(cachedStateChanges).length > 0;
+                updateSyncButton();
+            } catch (error) {
+                console.warn('Ignoring invalid cached state changes:', error);
+                cachedStateChanges = {};
+                hasUnsavedChanges = false;
+                localStorage.removeItem('feedbackStateChanges');
+            }
+        }
+
+        function cacheStateChange(feedbackId, changeData) {
+            const normalizedId = String(feedbackId || '').trim();
+            if (!normalizedId || !changeData || typeof changeData !== 'object' || Array.isArray(changeData)) {
+                throw new Error('A feedback ID and state change object are required');
+            }
+
+            cachedStateChanges[normalizedId] = {
+                ...(cachedStateChanges[normalizedId] || {}),
+                ...changeData,
+                feedback_id: normalizedId
+            };
             localStorage.setItem('feedbackStateChanges', JSON.stringify(cachedStateChanges));
-            
             hasUnsavedChanges = true;
             updateSyncButton();
         }
@@ -2099,7 +1961,7 @@
         
         // Sync cached changes to Fabric
         function syncToFabric() {
-            if (!bearerToken || !hasUnsavedChanges) return;
+            if (!hasFabricToken || !hasUnsavedChanges) return;
             
             const stateChanges = Object.values(cachedStateChanges);
             
@@ -2112,8 +1974,7 @@
             fetch('/api/feedback/states/sync', {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': bearerToken
+                    'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
                     state_changes: stateChanges
@@ -2133,7 +1994,7 @@
                     // Show success message
                     const successMsg = document.createElement('div');
                     successMsg.className = 'alert alert-success';
-                    successMsg.innerHTML = `✅ Successfully synced ${data.updated_count} state changes to Fabric`;
+                    successMsg.textContent = `✅ Successfully synced ${Number(data.updated_count) || 0} state changes to Fabric`;
                     document.querySelector('.fluent-container').insertBefore(successMsg, document.querySelector('#filter-section-container'));
                     setTimeout(() => successMsg.remove(), 5000);
                 } else {
@@ -2180,9 +2041,6 @@
                     fabricConnected = true;
                     window.fabricConnected = true;
                     
-                    // Save connection state to localStorage
-                    saveFabricConnectionState();
-                    
                     // Update UI with loaded state data
                     updateFeedbackWithSQLData(data.state_data);
                     
@@ -2214,21 +2072,15 @@
                     const syncResult = data.sync_result || {};
                     const successMsg = document.createElement('div');
                     successMsg.className = 'alert alert-success';
-                    successMsg.innerHTML = `
-                        ✅ <strong>Fabric SQL Sync Complete!</strong><br>
-                        📝 Added ${syncResult.new_items || 0} new feedback items (${syncResult.existing_items || 0} already existed)<br>
-                        🔄 Loaded ${Object.keys(data.state_data).length} state records from FeedbackState table<br>
-                        <small class="text-muted">Smart sync: Only new items were written to avoid duplicates</small>
-                    `;
+                    successMsg.style.whiteSpace = 'pre-line';
+                    successMsg.textContent =
+                        `✅ Fabric SQL Sync Complete!\n` +
+                        `📝 Added ${Number(syncResult.new_items) || 0} new feedback items ` +
+                        `(${Number(syncResult.existing_items) || 0} already existed)\n` +
+                        `🔄 Loaded ${Object.keys(data.state_data).length} state records from FeedbackState table\n` +
+                        'Smart sync: Only new items were written to avoid duplicates';
                     document.querySelector('.fluent-container').insertBefore(successMsg, document.querySelector('#filter-section-container'));
                     
-                    // CRITICAL FIX: Redirect to include fabric_connected parameter for session persistence
-                    setTimeout(() => {
-                        const currentUrl = new URL(window.location);
-                        currentUrl.searchParams.set('fabric_connected', 'true');
-                        console.log('🔄 Redirecting to set fabric_connected parameter for session persistence...');
-                        window.location.href = currentUrl.toString();
-                    }, 2000);
                     setTimeout(() => successMsg.remove(), 10000);
                     
                 } else {
@@ -2270,7 +2122,7 @@
                 const state = stateData[feedbackId];
                 
                 // Find the state badge element specifically (not dropdown elements)
-                const stateBadge = document.querySelector(`[data-feedback-id="${feedbackId}"][data-current-state]`);
+                const stateBadge = document.querySelector(`[data-feedback-id="${SafeDOM.cssEscape(feedbackId)}"][data-current-state]`);
                 
                 if (!stateBadge) {
                     // This is normal for paginated results - feedback not on current page
@@ -2298,7 +2150,7 @@
                         };
                             
                             stateBadge.textContent = stateNames[state.state] || state.state;
-                            stateBadge.className = `state-badge state-${state.state.toLowerCase()}`;
+                            stateBadge.className = `state-badge state-${SafeDOM.classToken(state.state)}`;
                             stateBadge.setAttribute('data-current-state', state.state);
                         }
                     }
@@ -2314,7 +2166,7 @@
                                 cardBody.appendChild(notesDisplay);
                             }
                         }
-                        notesDisplay.innerHTML = `📝 <strong>Notes:</strong> ${state.notes}`;
+                        notesDisplay.textContent = `📝 Notes: ${state.notes}`;
                     }
                     
                     // Update domain display - use existing domain-badge only
@@ -2335,14 +2187,6 @@
             // Store the state data globally for filtering
             window.fabricStateData = stateData;
             
-            // Also persist state data to localStorage for page reload survival
-            try {
-                localStorage.setItem('fabricStateData', JSON.stringify(stateData));
-                localStorage.setItem('fabricStateDataTime', Date.now().toString());
-                console.log('💾 State data persisted to localStorage for page reload survival');
-            } catch (error) {
-                console.warn('⚠️ Could not persist state data to localStorage:', error);
-            }
         }
         
         // Reapply state data after filtering or other operations
@@ -2359,12 +2203,6 @@
             fabricConnected = true;
             window.fabricConnected = true;
             window.stateManagementEnabled = true;  // Add this global variable
-            
-            // Save connection state to localStorage with timestamp
-            localStorage.setItem('fabricConnected', 'true');
-            localStorage.setItem('fabricStateEnabled', 'true');
-            localStorage.setItem('fabricDataSynced', 'true');
-            localStorage.setItem('fabricConnectionTime', Date.now().toString());
             
             // Enable all state controls
             document.querySelectorAll('.state-badge, .state-dropdown, [onclick*="updateDomain"], [onclick*="updateNotes"]').forEach(element => {
@@ -2625,45 +2463,22 @@
                 console.error('❌ Error setting up state preservation:', error);
             }
             
-            // Check if state management should be enabled immediately
-            const sessionToken = '{{ stored_token or "" }}';  // Bearer token for lakehouse writes only
-            const fabricConnectedParam = {% if fabric_connected_param %}true{% else %}false{% endif %};
-            // Use the fabricSqlConnected variable from above instead of redeclaring
-            const savedConnected = localStorage.getItem('fabricConnected');
-            const savedDataSynced = localStorage.getItem('fabricDataSynced');
-            const lastConnectionTime = localStorage.getItem('fabricConnectionTime');
-            
-            // Check if we have Fabric SQL connection OR fabric_connected URL parameter
+            // Check if state management should be enabled immediately.
             if (fabricSqlConnected) {
                 console.log('� Fabric SQL connection active - enabling state management from session');
                 stateManagementEnabled = true;
                 fabricConnected = true;
                 window.fabricConnected = true;
                 window.stateManagementEnabled = true;
-                // Update localStorage with current connection
-                localStorage.setItem('fabricConnected', 'true');
-                localStorage.setItem('fabricConnectionTime', Date.now().toString());
-                if (document.body && document.body.classList) {
-                    document.body.classList.remove('state-management-disabled');
-                }
-            } else if (fabricConnectedParam) {
-                console.log('🔗 Fabric connected URL parameter found - enabling state management from URL');
-                stateManagementEnabled = true;
-                fabricConnected = true;
-                window.fabricConnected = true;
-                window.stateManagementEnabled = true;
-                // Update localStorage with current connection
-                localStorage.setItem('fabricConnected', 'true');
-                localStorage.setItem('fabricConnectionTime', Date.now().toString());
                 if (document.body && document.body.classList) {
                     document.body.classList.remove('state-management-disabled');
                 }
             } else {
-                console.log('🔒 No Fabric SQL connection - state management disabled');
-                stateManagementEnabled = false;
+                console.log('No Fabric SQL connection; local editing remains available');
+                stateManagementEnabled = true;
                 fabricConnected = false;
                 window.fabricConnected = false;
-                window.stateManagementEnabled = false;
+                window.stateManagementEnabled = true;
                 
                 // Clear any stale connection state
                 localStorage.removeItem('fabricConnected');
@@ -2672,89 +2487,7 @@
                 localStorage.removeItem('fabricConnectionTime');
                 
                 if (document.body && document.body.classList) {
-                    document.body.classList.add('state-management-disabled');
-                }
-            }
-            
-            // Check if URL indicates fabric connection (from server-side state loading)
-            const urlParams = new URLSearchParams(window.location.search);
-            if (urlParams.get('fabric_connected') === 'true') {
-                console.log('🔗 URL indicates Fabric connection - enabling state management');
-                stateManagementEnabled = true;
-                fabricConnected = true;
-                if (document.body && document.body.classList) {
                     document.body.classList.remove('state-management-disabled');
-                }
-            }
-            
-            // If we have a valid connection, try to restore state data from localStorage
-            if (stateManagementEnabled && fabricConnected) {
-                const savedStateData = localStorage.getItem('fabricStateData');
-                const savedStateTime = localStorage.getItem('fabricStateDataTime');
-                
-                if (savedStateData && savedStateTime) {
-                    const stateAge = Date.now() - parseInt(savedStateTime);
-                    const thirtyMinutes = 30 * 60 * 1000;
-                    
-                    if (stateAge < thirtyMinutes) {
-                        try {
-                            const stateData = JSON.parse(savedStateData);
-                            console.log(`🔄 Restoring ${Object.keys(stateData).length} state records from localStorage`);
-                            
-                            // Store globally and apply to page
-                            window.fabricStateData = stateData;
-                            
-                            // Apply state data after DOM is fully ready
-                            setTimeout(() => {
-                                // Check if elements are available before applying
-                                const feedbackElements = document.querySelectorAll('[data-feedback-id]');
-                                console.log(`🔍 DOM Check: Found ${feedbackElements.length} feedback elements before applying state data`);
-                                
-                                if (feedbackElements.length > 0) {
-                                    updateFeedbackWithSQLData(stateData);
-                                    console.log('✅ State data restored and applied after page reload');
-                                } else {
-                                    console.log('⚠️ No feedback elements found yet, retrying state restoration...');
-                                    // Retry after a longer delay
-                                    setTimeout(() => {
-                                        const retryElements = document.querySelectorAll('[data-feedback-id]');
-                                        console.log(`🔍 Retry Check: Found ${retryElements.length} feedback elements`);
-                                        if (retryElements.length > 0) {
-                                            updateFeedbackWithSQLData(stateData);
-                                            console.log('✅ State data restored after retry');
-                                        } else {
-                                            console.log('⚠️ Still no feedback elements - state restoration skipped (might be filtered out)');
-                                        }
-                                    }, 500);
-                                }
-                            }, 250);
-                            
-                        } catch (error) {
-                            console.warn('⚠️ Could not restore state data from localStorage:', error);
-                            localStorage.removeItem('fabricStateData');
-                            localStorage.removeItem('fabricStateDataTime');
-                        }
-                    } else {
-                        console.log('🔒 State data is stale, clearing localStorage');
-                        localStorage.removeItem('fabricStateData');
-                        localStorage.removeItem('fabricStateDataTime');
-                    }
-                }
-            }
-            
-            // Add test button for debugging (remove in production)
-            if (window.location.hash === '#debug') {
-                try {
-                    const testBtn = document.createElement('button');
-                    testBtn.textContent = 'Test State Loading';
-                    testBtn.className = 'btn btn-warning btn-sm ms-2';
-                    testBtn.onclick = testStateLoading;
-                    const container = document.querySelector('.fluent-container');
-                    if (container) {
-                        container.appendChild(testBtn);
-                    }
-                } catch (error) {
-                    console.error('❌ Error adding debug button:', error);
                 }
             }
             
@@ -2822,10 +2555,7 @@
         // Single dropdown toggle function
         function toggleStateDropdown(element, event) {
             // Check if state management is enabled - ONLY based on backend session, not localStorage
-            const sessionToken = '{{ stored_token or "" }}';
-            
-            const isEnabled = stateManagementEnabled ||
-                             (sessionToken && sessionToken.trim() !== '' && sessionToken !== 'None');
+            const isEnabled = true;
             
             if (!isEnabled) {
                 alert('Please provide your Fabric Bearer Token first to enable state management.');
@@ -2892,7 +2622,7 @@
             });
             
             const feedbackId = element.getAttribute('data-feedback-id');
-            const dropdown = document.querySelector(`.state-dropdown[data-feedback-id="${feedbackId}"]`);
+            const dropdown = document.querySelector(`.state-dropdown[data-feedback-id="${SafeDOM.cssEscape(feedbackId)}"]`);
             const card = element.closest('.fluent-card');
             
             if (dropdown && dropdown.classList) {
@@ -2936,13 +2666,17 @@
         }
         
         // Toggle actions menu
-        // Update feedback state (cached)
+        // Update feedback state in the local store.
         function updateState(feedbackId, newState, stateElement) {
-            if (!stateManagementEnabled || !fabricConnected) {
-                alert('Please click "Sync with Fabric" first to connect to the SQL database and enable state management.');
-                return;
-            }
-            
+            const previousState = stateElement.getAttribute('data-current-state');
+            const previousText = stateElement.textContent;
+            const previousClassName = stateElement.className;
+            const restorePreviousState = () => {
+                stateElement.textContent = previousText;
+                stateElement.className = previousClassName;
+                stateElement.setAttribute('data-current-state', previousState);
+            };
+
             // Update UI immediately (no prompt)
             const stateNames = {
                 'NEW': '🆕 New',
@@ -2952,7 +2686,7 @@
             };
             
             stateElement.textContent = stateNames[newState] || newState;
-            stateElement.className = `state-badge state-${newState.toLowerCase()}`;
+            stateElement.className = `state-badge state-${SafeDOM.classToken(newState)}`;
             stateElement.setAttribute('data-current-state', newState);
             
             // Immediately sync to SQL database
@@ -2961,7 +2695,7 @@
                 state: newState
             };
             
-            console.log(`🔄 State changed: ${feedbackId} → ${newState} (syncing to SQL)`);
+            console.log(`🔄 State changed: ${feedbackId} → ${newState}`);
             
             // Call new SQL update API
             fetch('/api/feedback/state/update', {
@@ -2971,16 +2705,18 @@
                 },
                 body: JSON.stringify(changeData)
             })
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    console.log(`✅ Successfully updated state for ${feedbackId} in SQL database`);
+            .then(response => response.json().then(data => ({ response, data })))
+            .then(({ response, data }) => {
+                if (response.ok && data.status === 'success') {
+                    console.log(`✅ Successfully updated state for ${feedbackId}`);
                 } else {
+                    restorePreviousState();
                     console.error(`❌ Failed to update state for ${feedbackId}:`, data.message);
                     alert('Failed to update state: ' + data.message);
                 }
             })
             .catch(error => {
+                restorePreviousState();
                 console.error(`❌ Error updating state for ${feedbackId}:`, error);
                 alert('Error updating state: ' + error.message);
             });
@@ -2988,10 +2724,16 @@
         
         // Update notes display in UI
         function updateNotesDisplay(feedbackId, notes) {
-            const stateBadge = document.querySelector(`[data-feedback-id="${feedbackId}"][data-current-state]`);
+            const stateBadge = document.querySelector(`[data-feedback-id="${SafeDOM.cssEscape(feedbackId)}"][data-current-state]`);
             const card = stateBadge ? stateBadge.closest('.fluent-card-body') : null;
             if (card) {
                 let notesDisplay = card.querySelector('.notes-display');
+                if (!notes || !notes.trim()) {
+                    if (notesDisplay) {
+                        notesDisplay.remove();
+                    }
+                    return;
+                }
                 if (!notesDisplay) {
                     notesDisplay = document.createElement('div');
                     notesDisplay.className = 'notes-display';
@@ -3001,17 +2743,12 @@
                         stateSection.parentNode.insertBefore(notesDisplay, stateSection.nextSibling);
                     }
                 }
-                notesDisplay.innerHTML = `📝 ${notes}`;
+                notesDisplay.textContent = `📝 ${notes}`;
             }
         }
         
-        // Update domain with proper dropdown
-        function updateDomain(feedbackId, currentDomain) {
-            if (!stateManagementEnabled || !fabricConnected) {
-                alert('Please click "Sync with Fabric" first to connect to the SQL database and enable state management.');
-                return;
-            }
-            
+        // Legacy modal retained for compatibility with older markup.
+        function legacyUpdateDomainModal(feedbackId, currentDomain) {
             // Create domain selection modal
             showDomainSelectionModal(feedbackId, currentDomain);
         }
@@ -3044,8 +2781,8 @@
                             </select>
                         </div>
                         <div class="d-flex justify-content-end gap-2">
-                            <button type="button" class="btn btn-secondary" onclick="closeDomainModal()">Cancel</button>
-                            <button type="button" class="btn btn-primary" onclick="saveDomainChange('${feedbackId}'); return false;">Update Domain</button>
+                            <button type="button" class="btn btn-secondary" id="cancelDomainButton">Cancel</button>
+                            <button type="button" class="btn btn-primary" id="saveDomainButton">Update Domain</button>
                         </div>
                     </div>
                 </div>
@@ -3053,6 +2790,10 @@
             
             // Add modal to page
             document.body.insertAdjacentHTML('beforeend', modalHtml);
+            document.getElementById('cancelDomainButton').addEventListener('click', closeDomainModal);
+            document.getElementById('saveDomainButton').addEventListener('click', () => {
+                saveDomainModalChange(feedbackId);
+            });
         }
         
         // Close domain modal
@@ -3064,7 +2805,7 @@
         }
         
         // Save domain change from modal with direct SQL update
-        function saveDomainChange(feedbackId) {
+        function saveDomainModalChange(feedbackId) {
             const selectedDomain = document.getElementById('domainSelect').value;
             const domainNames = {
                 'GETTING_STARTED': 'Getting Started',
@@ -3171,12 +2912,6 @@
                 if (currentParams.get('show_repeating') === 'true') params.set('show_repeating', 'true');
                 if (currentParams.get('show_only_stored') === 'true') params.set('show_only_stored', 'true');
                 
-                // Preserve Fabric connection state to prevent state management loss after filtering
-                if (fabricConnected || stateManagementEnabled) {
-                    params.set('fabric_connected', 'true');
-                    console.log('🔧 MULTI-SELECT FILTER: Preserving Fabric connection state in URL');
-                }
-                
                 // Collect selected filters (without checking for "All" checkboxes)
                 const filterTypes = ['audience', 'priority', 'state', 'source', 'domain', 'sentiment', 'enhanced_category'];
                 
@@ -3232,14 +2967,17 @@
         
         // Show message to user
         function showMessage(message, type = 'info') {
-            // Create message element
             const messageEl = document.createElement('div');
             messageEl.className = `alert alert-${type === 'error' ? 'danger' : type === 'success' ? 'success' : 'info'} alert-dismissible fade show`;
             messageEl.style.cssText = 'position: fixed; top: 20px; right: 20px; z-index: 9999; max-width: 400px;';
-            messageEl.innerHTML = `
-                ${message}
-                <button type="button" class="btn-close" onclick="this.parentElement.remove()"></button>
-            `;
+            const messageText = document.createElement('span');
+            messageText.textContent = String(message ?? '');
+            const closeButton = document.createElement('button');
+            closeButton.type = 'button';
+            closeButton.className = 'btn-close';
+            closeButton.setAttribute('aria-label', 'Close');
+            closeButton.addEventListener('click', () => messageEl.remove());
+            messageEl.append(messageText, closeButton);
             
             // Add to page
             document.body.appendChild(messageEl);
@@ -3253,12 +2991,14 @@
         }
         
         // Update audience function
+        function updateAudienceFromElement(element) {
+            updateAudience(
+                element.dataset.feedbackId || '',
+                element.dataset.audience || ''
+            );
+        }
+
         function updateAudience(feedbackId, currentAudience) {
-            if (!stateManagementEnabled) {
-                alert('Please connect to Fabric first to enable audience updates.');
-                return;
-            }
-            
             // Create audience selection modal
             const modal = document.createElement('div');
             modal.id = 'audienceModal';
@@ -3270,28 +3010,39 @@
                     <div class="modal-content">
                         <div class="modal-header">
                             <h5 class="modal-title">Update Audience</h5>
-                            <button type="button" class="btn-close" onclick="closeAudienceModal()"></button>
+                            <button type="button" class="btn-close audience-modal-close" aria-label="Close"></button>
                         </div>
                         <div class="modal-body">
-                            <p><strong>Current:</strong> ${currentAudience || 'Not set'}</p>
+                            <p><strong>Current:</strong> <span id="currentAudienceText"></span></p>
                             <div class="mb-3">
                                 <label for="audienceSelect" class="form-label">Select new audience:</label>
                                 <select class="form-select" id="audienceSelect">
-                                    <option value="Developer" ${currentAudience === 'Developer' ? 'selected' : ''}>🛠️ Developer</option>
-                                    <option value="Customer" ${currentAudience === 'Customer' ? 'selected' : ''}>👤 Customer</option>
-                                    <option value="ISV" ${currentAudience === 'ISV' ? 'selected' : ''}>🏢 ISV</option>
+                                    <option value="Developer">🛠️ Developer</option>
+                                    <option value="Customer">👤 Customer</option>
+                                    <option value="ISV">🏢 ISV</option>
                                 </select>
                             </div>
                         </div>
                         <div class="modal-footer">
-                            <button type="button" class="btn btn-secondary" onclick="closeAudienceModal()">Cancel</button>
-                            <button type="button" class="btn btn-primary" onclick="saveAudienceChange('${feedbackId}')">Update Audience</button>
+                            <button type="button" class="btn btn-secondary audience-modal-close">Cancel</button>
+                            <button type="button" class="btn btn-primary" id="saveAudienceButton">Update Audience</button>
                         </div>
                     </div>
                 </div>
             `;
             
             document.body.appendChild(modal);
+            modal.querySelector('#currentAudienceText').textContent = currentAudience || 'Not set';
+            const audienceSelect = modal.querySelector('#audienceSelect');
+            if (['Developer', 'Customer', 'ISV'].includes(currentAudience)) {
+                audienceSelect.value = currentAudience;
+            }
+            modal.querySelectorAll('.audience-modal-close').forEach(button => {
+                button.addEventListener('click', closeAudienceModal);
+            });
+            modal.querySelector('#saveAudienceButton').addEventListener('click', () => {
+                saveAudienceChange(feedbackId);
+            });
         }
         
         // Close audience modal
@@ -3328,7 +3079,7 @@
                     console.log(`✅ Audience updated successfully: ${feedbackId} → ${selectedAudience}`);
                     
                     // Update audience display in UI
-                    const audienceElement = document.querySelector(`[data-feedback-id="${feedbackId}"] .audience-display`);
+                    const audienceElement = document.querySelector(`[data-feedback-id="${SafeDOM.cssEscape(feedbackId)}"] .audience-display`);
                     if (audienceElement) {
                         audienceElement.textContent = selectedAudience;
                     }
@@ -3348,8 +3099,7 @@
             return false;
         }
         
-        // Update notes
-        function updateNotes(feedbackId, currentNotes) {
+        function legacyUpdateNotesCached(feedbackId, currentNotes) {
             if (!stateManagementEnabled) {
                 alert('Please provide your Fabric Bearer Token first to enable state management.');
                 return;
@@ -3366,7 +3116,7 @@
 
         // Update domain display in UI
         function updateDomainDisplay(feedbackId, domainName) {
-            const stateBadge = document.querySelector(`[data-feedback-id="${feedbackId}"][data-current-state]`);
+            const stateBadge = document.querySelector(`[data-feedback-id="${SafeDOM.cssEscape(feedbackId)}"][data-current-state]`);
             const card = stateBadge ? stateBadge.closest('.fluent-card-body') : null;
             if (card) {
                 const domainSection = card.querySelector('.category-info:has(.domain-badge)');
@@ -3505,17 +3255,6 @@
         }
 
         async function showCategoryPicker(feedbackId, currentCategory, currentSubcategory, currentFeatureArea, currentDomainName = '') {
-            const urlParams = new URLSearchParams(window.location.search);
-            const hasStateData = window.fabricStateData && Object.keys(window.fabricStateData).length > 0;
-            const urlIndicatesConnection = urlParams.get('fabric_connected') === 'true';
-            const sessionToken = '{{ stored_token or "" }}';
-            const hasValidSession = sessionToken && sessionToken.trim() !== '' && sessionToken !== 'None';
-
-            if (!stateManagementEnabled && !hasStateData && !urlIndicatesConnection && !fabricConnected && !hasValidSession) {
-                alert('Please click "Sync with Fabric" first to connect to the SQL database and enable category updates.');
-                return;
-            }
-
             try {
                 const categories = await fetchCategoryData();
 
@@ -3712,7 +3451,7 @@
 
         function updateCategoryDisplay(feedbackId, categoryName, subcategoryName, featureArea, domainCode, domainName) {
             // Find ALL instances of this feedback item on the page (e.g. in list and potential duplicates)
-            const stateBadges = document.querySelectorAll(`[data-feedback-id="${feedbackId}"][data-current-state]`);
+            const stateBadges = document.querySelectorAll(`[data-feedback-id="${SafeDOM.cssEscape(feedbackId)}"][data-current-state]`);
             
             stateBadges.forEach(stateBadge => {
                 const card = stateBadge.closest('.fluent-card, .card');
@@ -3787,12 +3526,9 @@
             console.log('🔑 DOMContentLoaded event fired');
             
             // Check for session token first before disabling state management
-            const sessionToken = '{{ stored_token or "" }}';
-            
-            if (sessionToken && sessionToken.trim() !== '') {
+            if (hasFabricToken) {
                 console.log('🔑 DOMContentLoaded: Session token found, enabling state management');
                 stateManagementEnabled = true;
-                bearerToken = sessionToken;
                 if (document.body && document.body.classList) {
                     document.body.classList.remove('state-management-disabled');
                 }
@@ -3801,9 +3537,8 @@
                     tokenBanner.classList.add('hidden');
                 }
             } else {
-                console.log('🔑 DOMContentLoaded: No session token, ensuring proper disabled state');
-                stateManagementEnabled = false;
-                // Don't add disabled class if it might already be set in the session logic above
+                console.log('No Fabric token found; local editing remains available');
+                stateManagementEnabled = true;
             }
         });
         
@@ -3811,7 +3546,6 @@
         // Declare variables in global scope to avoid hoisting issues
         var fabricAuthDrawer = null;
         var collectionProgressDrawer = null;
-        var fabricToken = null;
         var fabricConnectionStatus = 'disconnected';
 
         // Initialize drawers on page load using new badge state manager
@@ -4107,11 +3841,8 @@
                             console.log('🔧 DEBUG: Restored tokenStatusBadge to Valid');
                         }
                         
-                        // Restore token reference
-                        fabricToken = 'stored';
-                        
                         // Enable state management for feedback page
-                        bearerToken = 'stored';
+                        hasFabricToken = true;
                         stateManagementEnabled = true;
                         if (document.body) {
                             document.body.classList.remove('state-management-disabled');
@@ -4142,13 +3873,10 @@
                             clearTokenBtn.style.display = 'none';
                         }
                         
-                        // Reset state management
-                        fabricToken = null;
-                        if (typeof bearerToken !== 'undefined') {
-                            bearerToken = null;
-                        }
-                        if (typeof stateManagementEnabled !== 'undefined') {
-                            stateManagementEnabled = false;
+                        hasFabricToken = false;
+                        stateManagementEnabled = true;
+                        if (document.body) {
+                            document.body.classList.remove('state-management-disabled');
                         }
                         
                         console.log('🔧 DEBUG: Disconnected drawer state restored');
@@ -4183,7 +3911,7 @@
             updateFabricAuthUI('validating', 'Validating token...');
             addFabricLog('🔄 Starting fast token validation...');
             
-            // Fast validation - if Livy accepts session start, token is valid
+            // Validation performs a token-authenticated Fabric SQL query.
             fetch('/api/fabric/token/validate', {
                 method: 'POST',
                 headers: {
@@ -4194,22 +3922,17 @@
             .then(response => response.json())
             .then(data => {
                 if (data.status === 'success') {
-                    fabricToken = token;
+                    hasFabricToken = true;
                     addFabricLog('✅ Token validation successful');
-                    addFabricLog('🚀 Livy session starting in background');
                     addFabricLog('📝 Token stored in session - state management enabled');
-                    
-                    if (data.session_id) {
-                        addFabricLog(`🔗 Session ID: ${data.session_id}`);
-                    }
                     
                     // Update badge using BadgeStateManager
                     if (window.badgeStateManager) {
-                        window.badgeStateManager.setFabricAuthState('connected', 'Connected', data.session_id);
+                        window.badgeStateManager.setFabricAuthState('connected', 'Connected');
                     }
                     
                     // Update drawer UI
-                    updateFabricAuthUI('connected', 'Token validated - Livy session starting');
+                    updateFabricAuthUI('connected', 'Token validated');
                     
                     // Show token management buttons
                     document.getElementById('currentTokenInfo').style.display = 'block';
@@ -4221,7 +3944,6 @@
                     document.getElementById('fabricAuthToken').value = '';
                     
                     // Enable state management in the feedback viewer
-                    bearerToken = token;
                     stateManagementEnabled = true;
                     fabricConnected = true;  // Also set fabricConnected flag
                     document.body.classList.remove('state-management-disabled');
@@ -4258,7 +3980,7 @@
                 return;
             }
 
-            fetch('/api/clear_session', {
+            fetch('/api/fabric/token/clear', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -4268,12 +3990,11 @@
             .then(data => {
                 if (data.status === 'success') {
                     // Clear all state variables
-                    fabricToken = null;
-                    bearerToken = null;
-                    stateManagementEnabled = false;
+                    hasFabricToken = false;
+                    stateManagementEnabled = true;
                     fabricConnected = false;
                     window.fabricConnected = false;
-                    window.stateManagementEnabled = false;
+                    window.stateManagementEnabled = true;
                     
                     // Clear any localStorage/sessionStorage
                     localStorage.removeItem('fabricConnected');
@@ -4289,9 +4010,9 @@
                     document.getElementById('updateTokenBtn').style.display = 'none';
                     document.getElementById('clearTokenBtn').style.display = 'none';
                     
-                    // Disable state management UI
+                    // Local editing remains available without a Fabric token.
                     if (document.body) {
-                        document.body.classList.add('state-management-disabled');
+                        document.body.classList.remove('state-management-disabled');
                     }
                     
                     // Update connection UI
@@ -4307,11 +4028,6 @@
                     console.log('🔧 FABRIC AUTH: Session cleared, all state reset');
                     console.log('🔧 FABRIC AUTH: fabricConnected =', fabricConnected);
                     console.log('🔧 FABRIC AUTH: stateManagementEnabled =', stateManagementEnabled);
-                    
-                    // Refresh the page to fully reset state
-                    setTimeout(() => {
-                        window.location.href = '/feedback';
-                    }, 1000);
                     
                 } else {
                     addFabricLog('❌ Error clearing session: ' + (data.message || 'Unknown error'));
@@ -4397,10 +4113,7 @@
 
         function addFabricLog(message) {
             const log = document.getElementById('fabricLog');
-            const timestamp = new Date().toLocaleTimeString();
-            const logEntry = document.createElement('div');
-            logEntry.innerHTML = `<span class="text-muted">[${timestamp}]</span> ${message}`;
-            log.appendChild(logEntry);
+            SafeDOM.appendTimestampedLog(log, message);
             
             // Auto-scroll to bottom
             const container = document.getElementById('fabricLogContainer');
@@ -4408,7 +4121,7 @@
         }
 
         function clearFabricLog() {
-            document.getElementById('fabricLog').innerHTML = '';
+            document.getElementById('fabricLog').replaceChildren();
         }
 
         // Collection Progress functions (placeholder)
@@ -4570,10 +4283,7 @@
         function addCollectionDrawerLog(message) {
             const logContainer = document.getElementById('collectionLog');
             if (logContainer) {
-                const timestamp = new Date().toLocaleTimeString();
-                const logEntry = document.createElement('div');
-                logEntry.innerHTML = `<span class="text-muted">[${timestamp}]</span> ${message}`;
-                logContainer.appendChild(logEntry);
+                SafeDOM.appendTimestampedLog(logContainer, message);
                 
                 // Auto-scroll to bottom
                 const container = document.getElementById('collectionLogContainer');
@@ -4587,7 +4297,7 @@
         function clearCollectionLog() {
             const logContainer = document.getElementById('collectionLog');
             if (logContainer) {
-                logContainer.innerHTML = '';
+                logContainer.replaceChildren();
             }
         }
         
@@ -4646,12 +4356,6 @@
                 url.searchParams.delete(filterType);
             } else {
                 url.searchParams.set(filterType, filterValue);
-            }
-            
-            // Preserve Fabric connection state in URL to prevent state loss
-            if (fabricConnected || stateManagementEnabled) {
-                url.searchParams.set('fabric_connected', 'true');
-                console.log('🔧 CLIENT FILTER: Preserving Fabric connection state in URL');
             }
             
             // Store current state management status before URL change
@@ -4715,17 +4419,6 @@
         // Update domain function
         function updateDomain(feedbackId, currentDomain) {
             console.log(`🏷️ Domain changing: ${feedbackId} → ${currentDomain}`);
-            
-            // Check if state management is enabled (allow if we have state data or URL parameter indicates connection)
-            const urlParams = new URLSearchParams(window.location.search);
-            const hasStateData = window.fabricStateData && Object.keys(window.fabricStateData).length > 0;
-            const urlIndicatesConnection = urlParams.get('fabric_connected') === 'true';
-            
-            if (!stateManagementEnabled && !hasStateData && !urlIndicatesConnection) {
-                alert('Please click "Sync with Fabric" first to connect to the SQL database and enable state management.');
-                return;
-            }
-            
             // Create domain dropdown
             showDomainDropdown(feedbackId, currentDomain);
         }
@@ -4742,7 +4435,7 @@
             }
             
             // Find the actions button for positioning
-            const actionsBtn = document.querySelector(`[data-feedback-id="${feedbackId}"][onclick*="toggleActionsMenu"]`);
+            const actionsBtn = document.querySelector(`[data-feedback-id="${SafeDOM.cssEscape(feedbackId)}"][onclick*="toggleActionsMenu"]`);
             if (!actionsBtn) {
                 console.error('Could not find actions button for positioning');
                 return;
@@ -4898,7 +4591,7 @@
                     console.log(`✅ Domain updated successfully: ${newDomain}`);
                     
                     // Update the UI immediately
-                    const badgeElement = document.querySelector(`[data-feedback-id="${feedbackId}"][data-current-state]`);
+                    const badgeElement = document.querySelector(`[data-feedback-id="${SafeDOM.cssEscape(feedbackId)}"][data-current-state]`);
                     const parentCard = badgeElement ? badgeElement.closest('.fluent-card, .card') : null;
                     if (parentCard) {
                         const domainBadge = parentCard.querySelector('.domain-badge');
@@ -4909,20 +4602,10 @@
                         }
                     }
                     
-                    // Show success message
-                    const successMsg = document.createElement('div');
-                    successMsg.className = 'alert alert-success alert-dismissible fade show';
-                    successMsg.style.cssText = 'position: fixed; top: 20px; right: 20px; z-index: 9999; max-width: 400px;';
-                    successMsg.innerHTML = `
-                        ✅ Domain updated successfully: ${domainNames[newDomain] || newDomain}
-                        <button type="button" class="btn-close" onclick="this.parentElement.remove()"></button>
-                    `;
-                    document.body.appendChild(successMsg);
-                    setTimeout(() => {
-                        if (successMsg.parentElement) {
-                            successMsg.remove();
-                        }
-                    }, 3000);
+                    showToastMessage(
+                        `Domain updated successfully: ${domainNames[newDomain] || newDomain}`,
+                        'success'
+                    );
                 } else {
                     console.error('❌ Domain update failed:', data.message);
                     alert('❌ Domain update failed: ' + data.message);
@@ -4970,132 +4653,46 @@
         `;
         document.head.appendChild(style);
         
-        // FINAL OVERRIDE - This will definitely take precedence with scroll preservation
-        window.updateDomain = function(feedbackId, currentDomain) {
-            console.log(`🏷️ FINAL OVERRIDE - Domain update requested: ${feedbackId} → current: ${currentDomain}`);
-            
-            // IMMEDIATELY capture and preserve scroll position
-            const currentScrollTop = window.pageYOffset || document.documentElement.scrollTop;
-            const currentScrollLeft = window.pageXOffset || document.documentElement.scrollLeft;
-            console.log(`📍 FINAL OVERRIDE - Captured scroll position: ${currentScrollLeft}, ${currentScrollTop}`);
-            
-            // Check if state management is enabled (allow if we have state data or URL parameter indicates connection)
-            const urlParams = new URLSearchParams(window.location.search);
-            const hasStateData = window.fabricStateData && Object.keys(window.fabricStateData).length > 0;
-            const urlIndicatesConnection = urlParams.get('fabric_connected') === 'true';
-            
-            console.log('🔍 FINAL OVERRIDE - Connection check:', {
-                stateManagementEnabled,
-                hasStateData: !!hasStateData,
-                urlIndicatesConnection,
-                fabricConnected,
-                sessionToken: '{{ stored_token or "" }}' ? 'present' : 'absent'
-            });
-            
-            // Check session token instead of localStorage for connection validation
-            const sessionToken = '{{ stored_token or "" }}';
-            const hasValidSession = sessionToken && sessionToken.trim() !== '' && sessionToken !== 'None';
-            
-            // Allow if ANY valid connection indicator is present
-            if (!stateManagementEnabled && !hasStateData && !urlIndicatesConnection && !fabricConnected && !hasValidSession) {
-                console.log('❌ FINAL OVERRIDE - No connection indicators found - showing alert');
-                alert('Please click "Sync with Fabric" first to connect to the SQL database and enable state management.');
-                // Restore scroll position after alert
-                setTimeout(() => {
-                    window.scrollTo(currentScrollLeft, currentScrollTop);
-                    console.log(`📍 FINAL OVERRIDE - Scroll restored after alert: ${currentScrollLeft}, ${currentScrollTop}`);
-                }, 0);
+        function updateNotes(feedbackId, currentNotes) {
+            const notes = prompt('Enter notes for this feedback:', currentNotes || '');
+            if (notes === null) {
                 return;
             }
-            
-            console.log('✅ FINAL OVERRIDE - Connection check passed - showing domain dropdown');
-            
-            // Wrap the showDomainDropdown call to ensure scroll preservation
-            setTimeout(() => {
-                // Create domain dropdown
-                if (typeof showDomainDropdown === 'function') {
-                    showDomainDropdown(feedbackId, currentDomain);
-                    // Force scroll restoration immediately after dropdown creation
-                    setTimeout(() => {
-                        window.scrollTo(currentScrollLeft, currentScrollTop);
-                        console.log(`📍 FINAL OVERRIDE - Scroll forcibly restored after dropdown: ${currentScrollLeft}, ${currentScrollTop}`);
-                    }, 0);
-                } else {
-                    console.log('🔧 FINAL OVERRIDE - showDomainDropdown not found, creating inline dropdown');
-                    // Fallback: create a simple dropdown inline
-                    const newDomain = prompt('Select new domain:\n1. GOVERNANCE\n2. USER_EXPERIENCE\n3. AUTHENTICATION\n4. PERFORMANCE\n5. INTEGRATION\n6. ANALYTICS\n\nEnter domain name:', currentDomain);
-                    if (newDomain && newDomain.trim()) {
-                        if (typeof saveDomainChange === 'function') {
-                            saveDomainChange(feedbackId, newDomain.trim().toUpperCase());
-                        } else {
-                            console.log('🔧 FINAL OVERRIDE - saveDomainChange not found either, calling API directly');
-                            // Direct API call with scroll preservation
-                            fetch('/api/update_domain_sql', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    feedback_id: feedbackId,
-                                    new_domain: newDomain.trim().toUpperCase()
-                                })
-                            })
-                            .then(response => {
-                                // Restore scroll immediately on response
-                                window.scrollTo(currentScrollLeft, currentScrollTop);
-                                return response.json();
-                            })
-                            .then(data => {
-                                if (data.success) {
-                                    alert('✅ Domain updated successfully!');
-                                } else {
-                                    alert('❌ Domain update failed: ' + data.message);
-                                }
-                                // Restore scroll after alert
-                                window.scrollTo(currentScrollLeft, currentScrollTop);
-                            })
-                            .catch(error => {
-                                alert('❌ Domain update error: ' + error.message);
-                                // Restore scroll after error
-                                window.scrollTo(currentScrollLeft, currentScrollTop);
-                            });
-                        }
-                    }
-                    // Restore scroll after prompt regardless
-                    setTimeout(() => {
-                        window.scrollTo(currentScrollLeft, currentScrollTop);
-                        console.log(`📍 FINAL OVERRIDE - Scroll restored after prompt: ${currentScrollLeft}, ${currentScrollTop}`);
-                    }, 0);
+
+            fetch('/api/feedback/notes', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ feedback_id: feedbackId, notes })
+            })
+            .then(response => response.json().then(data => ({ response, data })))
+            .then(({ response, data }) => {
+                if (!response.ok || data.status !== 'success') {
+                    throw new Error(data.message || 'Unable to update notes');
                 }
-            }, 0);
-        };
-        
-        // Also override updateNotes
-        window.updateNotes = function(feedbackId, currentNotes) {
-            console.log(`📝 FINAL OVERRIDE - Notes update requested: ${feedbackId}`);
-            
-            // Same connection check as domain update
-            const urlParams = new URLSearchParams(window.location.search);
-            const hasStateData = window.fabricStateData && Object.keys(window.fabricStateData).length > 0;
-            const urlIndicatesConnection = urlParams.get('fabric_connected') === 'true';
-            const sessionToken = '{{ stored_token or "" }}';
-            const hasValidSession = sessionToken && sessionToken.trim() !== '' && sessionToken !== 'None';
-            
-            if (!stateManagementEnabled && !hasStateData && !urlIndicatesConnection && !fabricConnected && !hasValidSession) {
-                alert('Please click "Sync with Fabric" first to connect to the SQL database and enable state management.');
-                return;
-            }
-            
-            console.log('✅ FINAL OVERRIDE - Notes update allowed');
-            const newNotes = prompt('Enter notes for this feedback:', currentNotes || '');
-            if (newNotes !== null) {
-                console.log(`💾 FINAL OVERRIDE - Saving notes for ${feedbackId}: ${newNotes}`);
-                // TODO: Implement notes API call
-                alert('Notes functionality to be implemented');
-            }
-        };
-        
-        console.log('🔧 FINAL OVERRIDE - Functions registered on window object');
-        
-        // ALSO OVERRIDE toggleActionsMenu - this is where the early check is happening
+                updateNotesDisplay(feedbackId, notes);
+                showMessage('Notes updated successfully', 'success');
+            })
+            .catch(error => {
+                console.error('Error updating notes:', error);
+                showMessage(error.message, 'error');
+            });
+        }
+
+        [
+            'fabricConnected',
+            'stateManagementEnabled',
+            'fabricDataSynced',
+            'fabricStateEnabled',
+            'fabricConnectionTime',
+            'fabricStateData',
+            'fabricStateDataTime'
+        ].forEach(key => localStorage.removeItem(key));
+
+        document.addEventListener('DOMContentLoaded', function() {
+            stateManagementEnabled = true;
+            window.stateManagementEnabled = true;
+            document.body.classList.remove('state-management-disabled');
+        });
     </script>
 
     <!-- Fabric Auth Drawer -->
@@ -5135,7 +4732,7 @@
                         </button>
                     </div>
                     <div class="form-text">
-                        This token enables state management and Fabric Lakehouse operations.
+                        This token enables optional Fabric SQL synchronization. Local editing does not require it.
                     </div>
                 </div>
             </div>
@@ -5269,15 +4866,7 @@
                 if (result.status === 'success') {
                     console.log('✅ Domain sync completed successfully:', result);
                     
-                    // Show success message
-                    const successMsg = document.createElement('div');
-                    successMsg.className = 'alert alert-success alert-dismissible fade show';
-                    successMsg.innerHTML = `
-                        ✅ <strong>Domain Sync Complete!</strong> ${result.message}
-                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-                    `;
-                    document.querySelector('.fluent-container').insertBefore(successMsg, document.querySelector('#filter-section-container'));
-                    setTimeout(() => successMsg.remove(), 8000);
+                    showToastMessage(`Domain sync complete! ${result.message}`, 'success');
                     
                     // Refresh the page to show updated domains
                     setTimeout(() => {

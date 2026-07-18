@@ -15,6 +15,7 @@
     <link href="{{ url_for('static', filename='css/fluent-design.css') }}" rel="stylesheet">
     
     <!-- Legacy scripts -->
+    <script src="{{ url_for('static', filename='js/safe-dom.js') }}"></script>
     <script src="{{ url_for('static', filename='js/badge-state-manager.js') }}"></script>
     
     <!-- New enhanced scripts -->
@@ -319,7 +320,7 @@
                             <button class="fluent-button fluent-button-secondary" onclick="restoreDefaultCategories()">
                                 <i class="bi bi-arrow-clockwise"></i> Restore Defaults
                             </button>
-                            <button class="fluent-button fluent-button-warning" onclick="recategorizeAll()" id="recategorizeBtn" title="Re-categorize all feedback in the SQL database using current category definitions">
+                            <button class="fluent-button fluent-button-warning" onclick="recategorizeAll()" id="recategorizeBtn" title="Re-categorize locally stored feedback using current category definitions">
                                 <i class="bi bi-arrow-repeat"></i> Re-categorize All
                             </button>
                         </div>
@@ -507,6 +508,9 @@
         let collectionProgressInterval = null;
         let collectionStartTime = null;
         let collectionOperationId = null;
+        const escapeHtml = value => window.SafeDOM.escapeHtml(value);
+        const encodeInlineValue = value => encodeURIComponent(String(value))
+            .replace(/'/g, '%27');
 
         // Function to render the keyword list in the UI
         function renderKeywordList(keywords) {
@@ -661,15 +665,15 @@
                     <button class="expand-btn" onclick="toggleCategory(this)">
                         <i class="bi bi-chevron-right"></i>
                     </button>
-                    <strong>${category.name || key}</strong>
+                    <strong>${escapeHtml(category.name || key)}</strong>
                     <div class="category-actions">
-                        <button class="fluent-button-icon" onclick="editCategory('${key}')" title="Edit category">
+                        <button class="fluent-button-icon" onclick="editCategory(decodeURIComponent('${encodeInlineValue(key)}'))" title="Edit category">
                             <i class="bi bi-pencil"></i>
                         </button>
-                        <button class="fluent-button-icon" onclick="addSubcategory('${key}')" title="Add subcategory">
+                        <button class="fluent-button-icon" onclick="addSubcategory(decodeURIComponent('${encodeInlineValue(key)}'))" title="Add subcategory">
                             <i class="bi bi-plus-circle"></i>
                         </button>
-                        <button class="fluent-button-icon" onclick="deleteCategory('${key}')" title="Delete category">
+                        <button class="fluent-button-icon" onclick="deleteCategory(decodeURIComponent('${encodeInlineValue(key)}'))" title="Delete category">
                             <i class="bi bi-trash"></i>
                         </button>
                     </div>
@@ -690,7 +694,7 @@
                 const sub = subcategories[subKey];
                 const keywordCount = (sub.keywords || []).length;
                 const keywordPreview = keywordCount > 0 ? 
-                    `<span class="keyword-count" title="${(sub.keywords || []).join(', ')}">${keywordCount} keyword${keywordCount !== 1 ? 's' : ''}</span>` : 
+                    `<span class="keyword-count" title="${escapeHtml((sub.keywords || []).join(', '))}">${keywordCount} keyword${keywordCount !== 1 ? 's' : ''}</span>` :
                     '<span class="text-muted">No keywords</span>';
                 
                 html += `
@@ -700,17 +704,17 @@
                                 <i class="bi bi-chevron-right"></i>
                             </button>
                             <div class="subcategory-info">
-                                <span class="subcategory-name">${sub.name || subKey}</span>
+                                <span class="subcategory-name">${escapeHtml(sub.name || subKey)}</span>
                                 <div class="subcategory-meta">
-                                    <span class="fluent-badge fluent-badge-${getPriorityBadgeClass(sub.priority)}">${sub.priority || 'medium'}</span>
+                                    <span class="fluent-badge fluent-badge-${getPriorityBadgeClass(sub.priority)}">${escapeHtml(sub.priority || 'medium')}</span>
                                     ${keywordPreview}
                                 </div>
                             </div>
                             <div class="subcategory-actions">
-                                <button class="fluent-button-icon" onclick="editSubcategory('${categoryKey}', '${subKey}')" title="Edit subcategory">
+                                <button class="fluent-button-icon" onclick="editSubcategory(decodeURIComponent('${encodeInlineValue(categoryKey)}'), decodeURIComponent('${encodeInlineValue(subKey)}'))" title="Edit subcategory">
                                     <i class="bi bi-pencil"></i>
                                 </button>
-                                <button class="fluent-button-icon" onclick="deleteSubcategory('${categoryKey}', '${subKey}')" title="Delete subcategory">
+                                <button class="fluent-button-icon" onclick="deleteSubcategory(decodeURIComponent('${encodeInlineValue(categoryKey)}'), decodeURIComponent('${encodeInlineValue(subKey)}'))" title="Delete subcategory">
                                     <i class="bi bi-trash"></i>
                                 </button>
                             </div>
@@ -739,12 +743,12 @@
         function renderSubcategoryDetails(subcategory) {
             return `
                 <div class="subcategory-details">
-                    ${subcategory.feature_area ? `<div class="mb-2"><strong>Feature Area:</strong> <span class="text-primary">${subcategory.feature_area}</span></div>` : ''}
+                    ${subcategory.feature_area ? `<div class="mb-2"><strong>Feature Area:</strong> <span class="text-primary">${escapeHtml(subcategory.feature_area)}</span></div>` : ''}
                     <div class="mb-2">
                         <strong>Keywords that trigger this category:</strong>
                         <div class="keywords-list mt-2">
                             ${subcategory.keywords && subcategory.keywords.length > 0 ? 
-                                subcategory.keywords.map(kw => `<span class="keyword-tag">${kw}</span>`).join('') :
+                                subcategory.keywords.map(kw => `<span class="keyword-tag">${escapeHtml(kw)}</span>`).join('') :
                                 '<span class="text-muted">No keywords configured - this subcategory won\'t be auto-detected</span>'
                             }
                         </div>
@@ -795,6 +799,7 @@
             
             currentCategories[key] = {
                 name: name,
+                audience: 'All',
                 subcategories: {}
             };
             renderCategoryTree(currentCategories);
@@ -832,7 +837,7 @@
                 name: name,
                 keywords: [],
                 priority: 'medium',
-                feature_area: ''
+                feature_area: 'General'
             };
             renderCategoryTree(currentCategories);
         }
@@ -866,7 +871,7 @@
             
             container.innerHTML = tempKeywords.map((kw, idx) => `
                 <span class="keyword-tag">
-                    ${kw}
+                    ${escapeHtml(kw)}
                     <button class="keyword-remove" onclick="removeKeywordFromSubcategory(${idx})" title="Remove keyword">
                         <i class="bi bi-x"></i>
                     </button>
@@ -1009,47 +1014,33 @@
             }, 5000);
         }
 
-        // Re-categorize all feedback in SQL using current categories
+        // Re-categorize all locally stored feedback using current categories
         function recategorizeAll() {
-            // First check if connected to SQL
-            fetch('/api/session_state')
-                .then(response => response.json())
-                .then(state => {
-                    if (!state.fabric_sql_connected) {
-                        showCategoriesStatus('Not connected to Fabric SQL. Please authenticate first via Sources & Settings.', true);
-                        return;
+            if (!confirm('This will re-categorize all locally stored feedback using the current category definitions.\n\nItems you manually categorized will be skipped.\n\nContinue?')) {
+                return;
+            }
+
+            const btn = document.getElementById('recategorizeBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Re-categorizing...';
+            showCategoriesStatus('Re-categorizing feedback... This may take a moment.');
+
+            fetch('/api/categories/recategorize', { method: 'POST' })
+                .then(async response => {
+                    const data = await response.json();
+                    if (!response.ok) {
+                        throw new Error(data.message || 'Re-categorization failed.');
                     }
-                    
-                    if (!confirm('This will re-categorize ALL feedback in the SQL database using the current category definitions.\n\nItems you manually categorized will be skipped.\n\nContinue?')) {
-                        return;
-                    }
-                    
-                    const btn = document.getElementById('recategorizeBtn');
-                    btn.disabled = true;
-                    btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Re-categorizing...';
-                    showCategoriesStatus('Re-categorizing feedback... This may take a moment.');
-                    
-                    fetch('/api/categories/recategorize', { method: 'POST' })
-                        .then(response => response.json())
-                        .then(data => {
-                            btn.disabled = false;
-                            btn.innerHTML = '<i class="bi bi-arrow-repeat"></i> Re-categorize All';
-                            if (data.status === 'success') {
-                                showCategoriesStatus(data.message);
-                            } else {
-                                showCategoriesStatus(data.message || 'Error during re-categorization.', true);
-                            }
-                        })
-                        .catch(error => {
-                            btn.disabled = false;
-                            btn.innerHTML = '<i class="bi bi-arrow-repeat"></i> Re-categorize All';
-                            console.error('Error:', error);
-                            showCategoriesStatus('Error during re-categorization.', true);
-                        });
+                    return data;
                 })
+                .then(data => showCategoriesStatus(data.message))
                 .catch(error => {
-                    console.error('Error checking session state:', error);
-                    showCategoriesStatus('Could not verify SQL connection status.', true);
+                    console.error('Error:', error);
+                    showCategoriesStatus(error.message || 'Error during re-categorization.', true);
+                })
+                .finally(() => {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="bi bi-arrow-repeat"></i> Re-categorize All';
                 });
         }
 
@@ -1088,31 +1079,32 @@
         function createImpactTypeCard(key, type) {
             const div = document.createElement('div');
             div.className = 'impact-type-card';
-            div.style.borderLeft = `4px solid ${type.color || '#666'}`;
+            const safeColor = window.SafeDOM.safeColor(type.color);
+            div.style.borderLeft = `4px solid ${safeColor}`;
             
             div.innerHTML = `
                 <div class="impact-type-header">
                     <div class="impact-type-info">
-                        <span class="impact-type-name" style="color: ${type.color || '#666'}">
-                            <strong>${key}</strong>
+                        <span class="impact-type-name" style="color: ${safeColor}">
+                            <strong>${escapeHtml(key)}</strong>
                         </span>
                         <span class="impact-type-priority fluent-badge fluent-badge-${getPriorityClass(type.priority)}">
-                            ${type.priority}
+                            ${escapeHtml(type.priority)}
                         </span>
                     </div>
                     <div class="impact-type-actions">
-                        <button class="fluent-button-icon" onclick="editImpactType('${key}')" title="Edit impact type">
+                        <button class="fluent-button-icon" onclick="editImpactType(decodeURIComponent('${encodeInlineValue(key)}'))" title="Edit impact type">
                             <i class="bi bi-pencil"></i>
                         </button>
-                        <button class="fluent-button-icon" onclick="deleteImpactType('${key}')" title="Delete impact type">
+                        <button class="fluent-button-icon" onclick="deleteImpactType(decodeURIComponent('${encodeInlineValue(key)}'))" title="Delete impact type">
                             <i class="bi bi-trash"></i>
                         </button>
                     </div>
                 </div>
                 <div class="impact-type-details">
-                    ${type.description ? `<p class="text-muted">${type.description}</p>` : ''}
+                    ${type.description ? `<p class="text-muted">${escapeHtml(type.description)}</p>` : ''}
                     <div class="keywords-list">
-                        ${(type.keywords || []).map(kw => `<span class="keyword-tag">${kw}</span>`).join('')}
+                        ${(type.keywords || []).map(kw => `<span class="keyword-tag">${escapeHtml(kw)}</span>`).join('')}
                     </div>
                 </div>
             `;
@@ -1147,6 +1139,7 @@
             const keywordsStr = prompt('Keywords (comma-separated):') || '';
             
             currentImpactTypes[upperKey] = {
+                name: upperKey.replace(/_/g, ' '),
                 description: description,
                 priority: priority.toLowerCase(),
                 color: color,
@@ -1184,7 +1177,7 @@
             fetch('/api/impact-types', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ impact_types: currentImpactTypes })
+                body: JSON.stringify(currentImpactTypes)
             })
             .then(response => response.json())
             .then(data => {
@@ -1271,7 +1264,7 @@
             document.getElementById('collectionSpinner').style.display = 'none';
             // Set initial alert color to neutral
             document.getElementById('currentCollectionSource').className = 'alert alert-secondary d-flex align-items-center';
-            document.getElementById('collectionLog').innerHTML = '';
+            document.getElementById('collectionLog').replaceChildren();
             
             // Ensure cancel button is enabled and properly styled
             const cancelButton = document.getElementById('cancelOperation');
@@ -1296,13 +1289,7 @@
         // Add log entry to collection drawer
         function addCollectionLog(message, type = 'info') {
             const logContainer = document.getElementById('collectionLog');
-            const timestamp = new Date().toLocaleTimeString();
-            
-            const logEntry = document.createElement('div');
-            logEntry.className = `mb-1 text-${type}`;
-            logEntry.innerHTML = `<span class="text-muted">[${timestamp}]</span> ${message}`;
-            
-            logContainer.appendChild(logEntry);
+            window.SafeDOM.appendTimestampedLog(logContainer, message, type);
             
             // Auto-scroll to bottom
             const container = document.getElementById('collectionLogContainer');
@@ -1423,24 +1410,25 @@
             }
         }
 
-        // Cancel current operation (collection or Fabric write)
-        function cancelOperation() {
-            const currentSource = document.getElementById('collectionSourceText').textContent;
-            
-            if (currentSource.includes('Fabric') || currentSource.includes('Writing')) {
-                addCollectionLog('🛑 Fabric write cancellation requested...', 'warning');
-                // TODO: Implement actual Fabric write cancellation via API
-            } else {
-                addCollectionLog('🛑 Collection cancellation requested...', 'warning');
-                // TODO: Implement actual collection cancellation
+        // Cancel the active collection or Fabric write.
+        async function cancelOperation() {
+            const cancelButton = document.getElementById('cancelOperation');
+            cancelButton.disabled = true;
+            try {
+                if (!window.enhancedCollectionManager) {
+                    throw new Error('Operation manager is unavailable');
+                }
+                await window.enhancedCollectionManager.cancelActiveOperation();
+                addCollectionLog('🛑 Cancellation requested...', 'warning');
+            } catch (error) {
+                cancelButton.disabled = false;
+                addCollectionLog(`❌ Unable to cancel: ${error.message}`, 'danger');
             }
-            
-            document.getElementById('cancelOperation').disabled = true;
         }
 
         // Clear collection log
         function clearCollectionLog() {
-            document.getElementById('collectionLog').innerHTML = '';
+            document.getElementById('collectionLog').replaceChildren();
         }
 
         let collectionInProgress = false;
@@ -1486,6 +1474,13 @@
                 })
                 .then(response => response.json())
                 .then(data => {
+                    const counts = {
+                        reddit: window.SafeDOM.finiteNumber(data.reddit),
+                        fabric: window.SafeDOM.finiteNumber(data.fabric),
+                        github: window.SafeDOM.finiteNumber(data.github),
+                        ado: window.SafeDOM.finiteNumber(data.ado),
+                        total: window.SafeDOM.finiteNumber(data.total)
+                    };
                     // Mark collection as complete
                     collectionInProgress = false;
                     localStorage.removeItem('collectionInProgress');
@@ -1493,31 +1488,31 @@
                     
                     // Update progress with final results
                     updateCollectionProgress(100, 'Collection completed successfully', 'Completed', {
-                        reddit: data.reddit,
-                        fabric: data.fabric,
-                        github: data.github,
-                        ado: data.ado
+                        reddit: counts.reddit,
+                        fabric: counts.fabric,
+                        github: counts.github,
+                        ado: counts.ado
                     });
                     
-                    addCollectionLog(`✅ Collection completed! Total: ${data.total} items`, 'success');
-                    addCollectionLog(`📊 Reddit: ${data.reddit}, Fabric: ${data.fabric}, GitHub: ${data.github}, ADO: ${data.ado}`, 'info');
+                    addCollectionLog(`✅ Collection completed! Total: ${counts.total} items`, 'success');
+                    addCollectionLog(`📊 Reddit: ${counts.reddit}, Fabric: ${counts.fabric}, GitHub: ${counts.github}, ADO: ${counts.ado}`, 'info');
                     
                     resultsDiv.innerHTML = `
                         <div class="alert alert-success">
                             <h5>🎉 Collection Complete!</h5>
                             <ul>
-                                <li>Reddit: ${data.reddit} items</li>
-                                <li>Fabric Community: ${data.fabric} items</li>
-                                <li>GitHub Discussions: ${data.github} items</li>
-                                <li>ADO Child Tasks: ${data.ado} items</li>
-                                <li><strong>Total: ${data.total} items</strong></li>
+                                <li>Reddit: ${counts.reddit} items</li>
+                                <li>Fabric Community: ${counts.fabric} items</li>
+                                <li>GitHub Discussions: ${counts.github} items</li>
+                                <li>ADO Child Tasks: ${counts.ado} items</li>
+                                <li><strong>Total: ${counts.total} items</strong></li>
                             </ul>
                             <small class="text-muted">Click "Collection Progress" to see detailed logs.</small>
                         </div>
                     `;
-                    lastCollectionHadData = data.total > 0;
+                    lastCollectionHadData = counts.total > 0;
                     
-                    completeCollectionOperation(true, `Successfully collected ${data.total} feedback items`, data);
+                    completeCollectionOperation(true, `Successfully collected ${counts.total} feedback items`, data);
                 })
                 .catch(error => {
                     console.error('Collection error:', error);
@@ -1610,7 +1605,7 @@
                     <ul>
                         <li><strong>SQLite (default):</strong> Persistent local store at <code>data/feedback_store.db</code> — preserves your edits across runs.</li>
                         <li><strong>CSV Export / Import:</strong> Use the buttons under "Local Storage" to back up or merge in another snapshot.</li>
-                        <li><strong>Fabric Lakehouse:</strong> Optional bulk write — requires a bearer token.</li>
+                        <li><strong>Fabric SQL:</strong> Optional bulk write - requires a bearer token.</li>
                     </ul>
                 </div>
                 <div style="padding:12px 20px;border-top:1px solid #e5e5e5;text-align:right;">
@@ -1700,22 +1695,17 @@
                     .then(data => {
                         if (data.completed) {
                             clearInterval(pollInterval);
-                            
-                            if (data.success) {
-                                resultDiv.innerHTML = `
-                                    <div class="alert alert-success">
-                                        <strong>🎉 Fabric Write Completed Successfully!</strong><br>
-                                        <small>${data.message}</small>
-                                    </div>
-                                `;
-                            } else {
-                                resultDiv.innerHTML = `
-                                    <div class="alert alert-danger">
-                                        <strong>❌ Fabric Write Failed</strong><br>
-                                        <small>${data.message}</small>
-                                    </div>
-                                `;
-                            }
+
+                            const alert = document.createElement('div');
+                            alert.className = `alert ${data.success ? 'alert-success' : 'alert-danger'}`;
+                            const heading = document.createElement('strong');
+                            heading.textContent = data.success
+                                ? '🎉 Fabric Write Completed Successfully!'
+                                : '❌ Fabric Write Failed';
+                            const detail = document.createElement('small');
+                            detail.textContent = String(data.message || '');
+                            alert.append(heading, document.createElement('br'), detail);
+                            resultDiv.replaceChildren(alert);
                         }
                     })
                     .catch(error => {
@@ -1756,18 +1746,6 @@
                 console.log('Bootstrap Offcanvas available:', typeof bootstrap.Offcanvas !== 'undefined');
             }
             
-            // Load saved token from localStorage
-            const savedToken = localStorage.getItem('fabricToken');
-            if (savedToken) {
-                const fabricTokenElement = document.getElementById('fabricAuthToken');
-                if (fabricTokenElement) {
-                    fabricTokenElement.value = savedToken;
-                    console.log('Loaded saved token from localStorage');
-                } else {
-                    // console.warn('fabricAuthToken element not found - token not restored');
-                }
-            }
-            
             // Restore progress state from localStorage
             restoreProgressState();
             
@@ -1778,6 +1756,21 @@
         // ==================== Persistent Collection Status Polling ====================
         let collectionStatusPollInterval = null;
         let lastKnownCollectionStatus = 'ready';
+
+        function clearCollectionManagerOperation() {
+            const manager = window.enhancedCollectionManager;
+            if (!manager) return;
+            if (
+                manager.activeOperationType === 'collection' ||
+                (manager.isCollecting && !manager.activeOperationType)
+            ) {
+                manager.isCollecting = false;
+                manager.activeOperationType = null;
+                manager.operationId = null;
+                manager.updateUI();
+            }
+            window.collectionOperationId = null;
+        }
         
         function startCollectionStatusPolling() {
             // Poll immediately on start
@@ -1800,6 +1793,12 @@
                     if (!progressBadge) return;
                     
                     if (data.status === 'running') {
+                        collectionOperationId = data.operation_id || collectionOperationId;
+                        if (window.enhancedCollectionManager && data.operation_id) {
+                            window.enhancedCollectionManager.operationId = data.operation_id;
+                            window.enhancedCollectionManager.activeOperationType = 'collection';
+                            window.enhancedCollectionManager.isCollecting = true;
+                        }
                         const progress = Math.round(data.progress || 0);
                         progressBadge.textContent = `${progress}%`;
                         progressBadge.className = 'fluent-badge fluent-badge-primary ms-auto';
@@ -1826,6 +1825,7 @@
                         }
                         
                     } else if (data.status === 'completed') {
+                        clearCollectionManagerOperation();
                         progressBadge.textContent = 'Complete';
                         progressBadge.className = 'fluent-badge fluent-badge-success ms-auto';
                         
@@ -1852,6 +1852,7 @@
                         }
                         
                     } else if (data.status === 'error') {
+                        clearCollectionManagerOperation();
                         progressBadge.textContent = 'Error';
                         progressBadge.className = 'fluent-badge fluent-badge-error ms-auto';
                         
@@ -1862,8 +1863,20 @@
                             completeCollectionOperation(false, data.error_message || 'Collection failed');
                             addCollectionLog(`❌ ${data.error_message || 'Collection failed'}`, 'danger');
                         }
+                    } else if (data.status === 'cancelled') {
+                        clearCollectionManagerOperation();
+                        progressBadge.textContent = 'Cancelled';
+                        progressBadge.className = 'fluent-badge fluent-badge-secondary ms-auto';
+                        collectionInProgress = false;
+                        const cancelButton = document.getElementById('cancelOperation');
+                        if (cancelButton) cancelButton.disabled = true;
+
+                        if (prevStatus === 'running') {
+                            addCollectionLog('🛑 Collection cancelled', 'warning');
+                        }
                         
                     } else {
+                        clearCollectionManagerOperation();
                         // ready state — only update badge if not showing a recent completion
                         if (prevStatus === 'ready') {
                             progressBadge.textContent = 'Ready';
@@ -1892,8 +1905,13 @@
                 currentSourceClass: document.getElementById('currentCollectionSource').className,
                 spinnerDisplay: document.getElementById('collectionSpinner').style.display,
                 cancelButtonDisabled: document.getElementById('cancelOperation').disabled,
-                // Save logs
-                logs: document.getElementById('collectionLog').innerHTML,
+                logs: Array.from(document.getElementById('collectionLog').children)
+                    .slice(-200)
+                    .map(entry => ({
+                        message: entry.dataset.logMessage || entry.textContent || '',
+                        type: entry.dataset.logType || 'info',
+                        timestamp: entry.dataset.logTimestamp || ''
+                    })),
                 timestamp: Date.now()
             };
             localStorage.setItem('progressState', JSON.stringify(progressState));
@@ -1920,9 +1938,18 @@
                         document.getElementById('collectionSpinner').style.display = state.spinnerDisplay || 'none';
                         document.getElementById('cancelOperation').disabled = state.cancelButtonDisabled || false;
                         
-                        // Restore logs
-                        if (state.logs) {
-                            document.getElementById('collectionLog').innerHTML = state.logs;
+                        if (Array.isArray(state.logs)) {
+                            const logContainer = document.getElementById('collectionLog');
+                            logContainer.replaceChildren();
+                            state.logs.slice(-200).forEach(log => {
+                                if (!log || typeof log !== 'object') return;
+                                window.SafeDOM.appendTimestampedLog(
+                                    logContainer,
+                                    log.message,
+                                    log.type,
+                                    log.timestamp
+                                );
+                            });
                         }
                         
                         console.log('Restored complete progress state:', state.badge);
@@ -1952,15 +1979,39 @@
             const btn = document.getElementById('exportFeedbackBtn');
             if (btn) { btn.disabled = true; btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Exporting...'; }
             try {
-                // Trigger a normal download. The endpoint sets Content-Disposition.
-                window.location.href = '/api/feedback/export?download=true';
-                showStorageStatus('Export started. Your browser will download a timestamped CSV.');
+                const response = await fetch('/api/feedback/export', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ download: true })
+                });
+                if (!response.ok) {
+                    let message = `HTTP ${response.status}`;
+                    try {
+                        const error = await response.json();
+                        message = error.message || message;
+                    } catch (_) {
+                        // Keep the HTTP status when the response is not JSON.
+                    }
+                    throw new Error(message);
+                }
+
+                const blob = await response.blob();
+                const disposition = response.headers.get('Content-Disposition') || '';
+                const match = disposition.match(/filename="?([^";]+)"?/i);
+                const filename = match ? match[1] : 'feedback_export.csv';
+                const downloadUrl = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = downloadUrl;
+                link.download = filename;
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                URL.revokeObjectURL(downloadUrl);
+                showStorageStatus('Export complete.');
             } catch (e) {
-                showStorageStatus('Export failed: ' + e, true);
+                showStorageStatus('Export failed: ' + e.message, true);
             } finally {
-                setTimeout(() => {
-                    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="bi bi-download"></i> Export to CSV (timestamped)'; }
-                }, 1500);
+                if (btn) { btn.disabled = false; btn.innerHTML = '<i class="bi bi-download"></i> Export to CSV (timestamped)'; }
             }
         }
 

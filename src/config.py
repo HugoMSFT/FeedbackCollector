@@ -1,22 +1,65 @@
 import os
-import sys
+import copy
 from dotenv import load_dotenv
-import json  # Ensure json is imported
-from runtime_paths import DATA_DIR, SRC_DIR, find_env_file, get_env_candidates
+import json
+import logging
+import tempfile
+from runtime_paths import (
+    DATA_DIR,
+    SRC_DIR,
+    find_env_file,
+    get_env_candidates,
+    migrate_legacy_packaged_data,
+)
 
+logger = logging.getLogger(__name__)
+_migrated_legacy_files = migrate_legacy_packaged_data()
+if _migrated_legacy_files:
+    logger.info(
+        "Migrated legacy packaged data: %s",
+        ", ".join(_migrated_legacy_files),
+    )
 env_path = find_env_file()
 
-# Load .env file with override=True to ensure values are loaded
-result = load_dotenv(env_path, override=True) if env_path else False
-print(f"🔧 load_dotenv result: {result}, path: {env_path}")
+# Environment variables supplied by the process take precedence over .env.
+if env_path:
+    load_dotenv(env_path, override=False)
+else:
+    logger.info("No .env file found; checked %s", get_env_candidates())
 
-if not env_path:
-    print(f"⚠️ .env file not found. Tried: {get_env_candidates()}")
 
-# Verify credentials are loaded
-if getattr(sys, "frozen", False):
-    reddit_id = os.getenv("REDDIT_CLIENT_ID")
-    print(f"🔍 REDDIT_CLIENT_ID loaded: {reddit_id is not None and reddit_id != ''} (type: {type(reddit_id).__name__})")
+def _env_int(name, default, minimum=1, maximum=None):
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if value < minimum or (maximum is not None and value > maximum):
+        upper = f" and at most {maximum}" if maximum is not None else ""
+        raise ValueError(f"{name} must be at least {minimum}{upper}")
+    return value
+
+
+def _env_float(name, default, minimum=0):
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number") from exc
+    if value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    return value
+
+
+def _env_list(name, default):
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return list(default)
+    return [item.strip() for item in raw_value.split(",") if item.strip()]
 
 # API Configuration
 REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
@@ -32,11 +75,6 @@ ADO_PARENT_WORK_ITEM_ID = os.getenv("ADO_PARENT_WORK_ITEM_ID")
 ADO_PROJECT_NAME = os.getenv("ADO_PROJECT_NAME")
 ADO_ORG_URL = os.getenv("ADO_ORG_URL")
 
-# Fabric Livy API Configuration
-FABRIC_LIVY_ENDPOINT = os.getenv("FABRIC_LIVY_ENDPOINT")
-FABRIC_TARGET_TABLE_NAME = os.getenv("FABRIC_TARGET_TABLE_NAME")
-FABRIC_WRITE_MODE = os.getenv("FABRIC_WRITE_MODE")
-
 # Power BI Report Configuration
 POWERBI_REPORT_ID = os.getenv("POWERBI_REPORT_ID")
 POWERBI_TENANT_ID = os.getenv("POWERBI_TENANT_ID")
@@ -44,13 +82,10 @@ POWERBI_EMBED_BASE_URL = os.getenv("POWERBI_EMBED_BASE_URL")
 
 # Storage Configuration
 OUTPUT_DIR = DATA_DIR
-FABRIC_STORAGE_URL = os.getenv("FABRIC_STORAGE_URL")
-FABRIC_STORAGE_KEY = os.getenv("FABRIC_STORAGE_KEY")
 
 # Fabric SQL Database Configuration
 FABRIC_SQL_SERVER = os.getenv("FABRIC_SQL_SERVER")
 FABRIC_SQL_DATABASE = os.getenv("FABRIC_SQL_DATABASE")
-FABRIC_SQL_AUTHENTICATION = os.getenv("FABRIC_SQL_AUTHENTICATION", "AzureActiveDirectoryInteractive")
 
 # Enhanced Hierarchical Feedback Categories (Default Configuration)
 DEFAULT_ENHANCED_FEEDBACK_CATEGORIES = {
@@ -905,14 +940,36 @@ USER_KEYWORDS_FILE = os.path.join(DATA_DIR, "keywords.json")
 
 # Default keywords
 DEFAULT_KEYWORDS = [
-    "workload hub",
-    "Workload Development Kit",
-    "WDK",
-    "Develop Workloads",
-    "Marketplace",
-    "ISV",
-    "FET",
-    "Fabric Extensibility Toolkit",
+    "SQL Server",
+    "Microsoft SQL Server",
+    "Azure SQL",
+    "Azure SQL Database",
+    "Azure SQL Managed Instance",
+    "SQL Managed Instance",
+    "T-SQL",
+    "Transact-SQL",
+    "SQL Server Management Studio",
+    "SSMS",
+    "sqlcmd",
+    "DacFx",
+    "SQL database",
+    "database engine",
+    "query store",
+    "Always On",
+    "availability group",
+    "columnstore",
+    "tempdb",
+    "PolyBase",
+    "data virtualization",
+    "OPENROWSET",
+    "external tables",
+    "external table",
+    "Parquet",
+    "Delta",
+    "CETAS",
+    "CTAS",
+    "Fabric SQL database",
+    "Fabric Warehouse",
 ]
 
 
@@ -923,12 +980,36 @@ def save_keywords(keywords_to_save):
     re-deploys / re-installs don't clobber user customizations and frozen
     builds (where ``SRC_DIR`` is read-only) still succeed.
     """
+    _atomic_write_json(USER_KEYWORDS_FILE, keywords_to_save)
+
+
+def _atomic_write_json(path, payload):
+    """Write JSON atomically so interrupted saves cannot corrupt taxonomy."""
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    temp_path = None
     try:
-        os.makedirs(os.path.dirname(USER_KEYWORDS_FILE), exist_ok=True)
-        with open(USER_KEYWORDS_FILE, "w", encoding="utf-8") as f:
-            json.dump(keywords_to_save, f, indent=2)
-    except Exception as e:
-        print(f"Error saving keywords to '{USER_KEYWORDS_FILE}': {e}")
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=directory,
+            prefix=f".{os.path.basename(path)}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = handle.name
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    except Exception:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except FileNotFoundError:
+                pass
+        raise
 
 
 def _read_keywords_file(path):
@@ -943,21 +1024,21 @@ def _read_keywords_file(path):
         loaded = json.loads(content)
         if isinstance(loaded, list):
             return loaded
-        print(f"Warning: Content of '{path}' is not a list. Ignoring.")
+        logger.warning("Content of %s is not a list; ignoring it", path)
         return None
     except json.JSONDecodeError as e:
-        print(f"Error decoding JSON from '{path}': {e}. Ignoring.")
+        logger.warning("Invalid JSON in %s; ignoring it: %s", path, e)
         return None
     except Exception as e:
-        print(f"Unexpected error reading '{path}': {e}. Ignoring.")
+        logger.warning("Unable to read %s; ignoring it: %s", path, e)
         return None
 
 
 def load_keywords():
     """Load keywords with cascade: user copy → bundled copy → defaults.
 
-    On first call when only the bundled copy or defaults are available, a
-    user copy is seeded so future saves have a consistent location.
+    Loading never writes files. A user copy is created only after an explicit
+    save from the UI.
     """
     # 1. Prefer the user-writable copy under DATA_DIR.
     user_kws = _read_keywords_file(USER_KEYWORDS_FILE)
@@ -967,16 +1048,13 @@ def load_keywords():
     # 2. Fall back to the bundled copy under SRC_DIR.
     bundled_kws = _read_keywords_file(KEYWORDS_FILE)
     if bundled_kws is not None:
-        # Seed the user copy so subsequent saves land in DATA_DIR.
-        save_keywords(bundled_kws)
         return bundled_kws
 
-    # 3. Fall back to the in-code defaults and seed the user copy.
-    print(
-        f"No keywords file found at '{USER_KEYWORDS_FILE}' or '{KEYWORDS_FILE}'. "
-        "Seeding from DEFAULT_KEYWORDS."
+    logger.warning(
+        "No keywords file found at %s or %s; using defaults",
+        USER_KEYWORDS_FILE,
+        KEYWORDS_FILE,
     )
-    save_keywords(DEFAULT_KEYWORDS)
     return DEFAULT_KEYWORDS.copy()
 
 
@@ -995,12 +1073,7 @@ USER_IMPACT_TYPES_FILE = os.path.join(DATA_DIR, "impact_types.json")
 
 def save_categories(categories_to_save):
     """Save custom categories configuration to the user-writable JSON file."""
-    try:
-        os.makedirs(os.path.dirname(USER_CATEGORIES_FILE), exist_ok=True)
-        with open(USER_CATEGORIES_FILE, "w", encoding="utf-8") as f:
-            json.dump(categories_to_save, f, indent=2)
-    except Exception as e:
-        print(f"Error saving categories to '{USER_CATEGORIES_FILE}': {e}")
+    _atomic_write_json(USER_CATEGORIES_FILE, categories_to_save)
 
 
 def _read_json_dict_file(path):
@@ -1015,13 +1088,13 @@ def _read_json_dict_file(path):
         loaded = json.loads(content)
         if isinstance(loaded, dict):
             return loaded
-        print(f"Warning: Content of '{path}' is not a dict. Ignoring.")
+        logger.warning("Content of %s is not a dictionary; ignoring it", path)
         return None
     except json.JSONDecodeError as e:
-        print(f"Error decoding JSON from '{path}': {e}. Ignoring.")
+        logger.warning("Invalid JSON in %s; ignoring it: %s", path, e)
         return None
     except Exception as e:
-        print(f"Unexpected error reading '{path}': {e}. Ignoring.")
+        logger.warning("Unable to read %s; ignoring it: %s", path, e)
         return None
 
 
@@ -1033,25 +1106,19 @@ def load_categories():
 
     bundled_cats = _read_json_dict_file(CATEGORIES_FILE)
     if bundled_cats is not None:
-        save_categories(bundled_cats)
         return bundled_cats
 
-    print(
-        f"No categories file found at '{USER_CATEGORIES_FILE}' or '{CATEGORIES_FILE}'. "
-        "Seeding from DEFAULT_ENHANCED_FEEDBACK_CATEGORIES."
+    logger.warning(
+        "No categories file found at %s or %s; using defaults",
+        USER_CATEGORIES_FILE,
+        CATEGORIES_FILE,
     )
-    save_categories(DEFAULT_ENHANCED_FEEDBACK_CATEGORIES)
-    return DEFAULT_ENHANCED_FEEDBACK_CATEGORIES.copy()
+    return copy.deepcopy(DEFAULT_ENHANCED_FEEDBACK_CATEGORIES)
 
 
 def save_impact_types(impact_types_to_save):
     """Save custom impact types configuration to the user-writable JSON file."""
-    try:
-        os.makedirs(os.path.dirname(USER_IMPACT_TYPES_FILE), exist_ok=True)
-        with open(USER_IMPACT_TYPES_FILE, "w", encoding="utf-8") as f:
-            json.dump(impact_types_to_save, f, indent=2)
-    except Exception as e:
-        print(f"Error saving impact types to '{USER_IMPACT_TYPES_FILE}': {e}")
+    _atomic_write_json(USER_IMPACT_TYPES_FILE, impact_types_to_save)
 
 
 def load_impact_types():
@@ -1062,15 +1129,14 @@ def load_impact_types():
 
     bundled_types = _read_json_dict_file(IMPACT_TYPES_FILE)
     if bundled_types is not None:
-        save_impact_types(bundled_types)
         return bundled_types
 
-    print(
-        f"No impact types file found at '{USER_IMPACT_TYPES_FILE}' or '{IMPACT_TYPES_FILE}'. "
-        "Seeding from IMPACT_TYPES defaults."
+    logger.warning(
+        "No impact types file found at %s or %s; using defaults",
+        USER_IMPACT_TYPES_FILE,
+        IMPACT_TYPES_FILE,
     )
-    save_impact_types(IMPACT_TYPES)
-    return IMPACT_TYPES.copy()
+    return copy.deepcopy(IMPACT_TYPES)
 
 
 # Initialize categories and impact types - loaded once when module is imported
@@ -1079,16 +1145,22 @@ IMPACT_TYPES_CONFIG = load_impact_types()
 
 # Source URLs
 MS_FABRIC_COMMUNITY_URL = "https://community.fabric.microsoft.com/t5/Fabric-platform-forums/ct-p/AC-Community"
-REDDIT_SUBREDDIT = "MicrosoftFabric"
-GITHUB_REPO_OWNER = "microsoft"
-GITHUB_REPO_NAME = "Microsoft-Fabric-workload-development-sample"
+REDDIT_SUBREDDIT = os.getenv("REDDIT_SUBREDDIT", "SQLServer")
+REDDIT_SUBREDDITS = _env_list(
+    "REDDIT_SUBREDDITS",
+    [REDDIT_SUBREDDIT, "Database", "MicrosoftFabric"],
+)
+GITHUB_REPO_OWNER = os.getenv("GITHUB_REPO_OWNER", "microsoft")
+GITHUB_REPO_NAME = os.getenv(
+    "GITHUB_REPO_NAME", "vscode-mssql"
+)
 
 # Additional GitHub Repositories (can be configured in web interface)
 # Format: list of dicts with 'owner' and 'repo' keys
 ADDITIONAL_GITHUB_REPOS = [
     # Examples:
-    # {'owner': 'microsoft', 'repo': 'fabric-samples'},
-    # {'owner': 'microsoft', 'repo': 'powerbi-desktop'},
+    # {"owner": "microsoft", "repo": "DacFx"},
+    # {"owner": "dotnet", "repo": "SqlClient"},
 ]
 
 # Feedback State Management Configuration
@@ -1122,6 +1194,9 @@ FEEDBACK_STATES = {
 # Default state for new feedback
 DEFAULT_FEEDBACK_STATE = "NEW"
 # Processing Configuration
-MAX_ITEMS_PER_RUN = 500
-DEFAULT_STATUS = "New"
-SYSTEM_USER = "FeedbackCollector"
+MAX_ITEMS_PER_RUN = _env_int("MAX_ITEMS_PER_RUN", 500, minimum=1, maximum=10000)
+REQUEST_TIMEOUT_SECONDS = _env_float("REQUEST_TIMEOUT_SECONDS", 30.0, minimum=0.1)
+HTTP_RETRY_COUNT = _env_int("HTTP_RETRY_COUNT", 3, minimum=0, maximum=10)
+HTTP_BACKOFF_FACTOR = _env_float("HTTP_BACKOFF_FACTOR", 0.5, minimum=0)
+DEFAULT_STATUS = os.getenv("DEFAULT_STATUS", "New")
+SYSTEM_USER = os.getenv("SYSTEM_USER", "FeedbackCollector")

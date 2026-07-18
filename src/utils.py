@@ -14,7 +14,6 @@ from config import (
 
 # Configure logging
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 NLTK_RESOURCES = {
     "corpora/averaged_perceptron_tagger": "averaged_perceptron_tagger",
@@ -516,8 +515,16 @@ def determine_impact_type(text: str) -> str:
 
     # Score each impact type based on keyword matches
     for impact_id, impact_info in IMPACT_TYPES_CONFIG.items():
+        if not isinstance(impact_info, dict) or not isinstance(
+            impact_info.get("keywords"),
+            list,
+        ):
+            logger.debug("Ignoring malformed impact type %s", impact_id)
+            continue
         score = 0
         for keyword in impact_info["keywords"]:
+            if not isinstance(keyword, str):
+                continue
             if keyword.lower() in text_lower:
                 score += 1
         impact_scores[impact_id] = score
@@ -596,18 +603,38 @@ def enhanced_categorize_feedback(text: str, source: str = "", scenario: str = ""
 
     # Analyze all categories and subcategories
     for category_id, category_info in ENHANCED_FEEDBACK_CATEGORIES.items():
-        for subcategory_id, subcategory_info in category_info["subcategories"].items():
+        if not isinstance(category_info, dict) or not isinstance(
+            category_info.get("subcategories"),
+            dict,
+        ):
+            logger.debug("Ignoring malformed category %s", category_id)
+            continue
+        for subcategory_id, subcategory_info in category_info[
+            "subcategories"
+        ].items():
+            if not isinstance(subcategory_info, dict) or not isinstance(
+                subcategory_info.get("keywords"),
+                list,
+            ):
+                logger.debug(
+                    "Ignoring malformed subcategory %s",
+                    subcategory_id,
+                )
+                continue
             score = 0
             keywords_found = 0
 
             # Count keyword matches
             for keyword in subcategory_info["keywords"]:
+                if not isinstance(keyword, str):
+                    continue
                 if keyword.lower() in text_lower:
                     score += 1
                     keywords_found += 1
 
             # Bonus for audience alignment
-            if category_info["audience"] == audience or category_info["audience"] == "All":
+            category_audience = category_info.get("audience", "All")
+            if category_audience == audience or category_audience == "All":
                 score += 2
 
             # Bonus for source alignment
@@ -619,10 +646,19 @@ def enhanced_categorize_feedback(text: str, source: str = "", scenario: str = ""
             if score > best_score:
                 best_score = score
                 best_match = {
-                    "primary_category": category_info["name"],
-                    "subcategory": subcategory_info["name"],
-                    "priority": subcategory_info["priority"],
-                    "feature_area": subcategory_info["feature_area"],
+                    "primary_category": category_info.get(
+                        "name",
+                        str(category_id),
+                    ),
+                    "subcategory": subcategory_info.get(
+                        "name",
+                        str(subcategory_id),
+                    ),
+                    "priority": subcategory_info.get("priority", "medium"),
+                    "feature_area": subcategory_info.get(
+                        "feature_area",
+                        "General",
+                    ),
                 }
                 total_keywords_found = keywords_found
                 best_subcategory_keyword_count = len(subcategory_info["keywords"])
@@ -904,27 +940,10 @@ if __name__ == "__main__":
 
 
 def call_mcp_tool(server_name: str, tool_name: str, arguments: dict):
-    """
-    Call an MCP tool - placeholder for integration with actual MCP tools
-
-    Args:
-        server_name: Name of the MCP server
-        tool_name: Name of the tool to call
-        arguments: Dictionary of arguments to pass to the tool
-
-    Returns:
-        The result from the MCP tool call
-    """
-    logger.info(f"🔄 MCP tool call requested: {server_name}.{tool_name}")
-    logger.info(f"📞 This should be replaced with actual MCP client integration")
-
-    # Return a placeholder indicating real MCP integration is needed
-    return {
-        "items": [],
-        "totalCount": 0,
-        "hasMore": False,
-        "message": f"Real MCP integration needed for {server_name}.{tool_name}",
-    }
+    """Reject the unsupported in-process MCP integration path."""
+    raise NotImplementedError(
+        f"MCP tool calls are not supported by this application: {server_name}.{tool_name}"
+    )
 
 
 # Removed _call_ado_tool_direct function - replaced with direct MCP integration recommendation
@@ -973,6 +992,104 @@ def detect_domain(text: str) -> list:
     return detected_domains
 
 
+def _clean_similarity_text(text: str) -> str:
+    if not text:
+        return ""
+    text = re.sub(r"[^\w\s]", " ", str(text).lower())
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _calculate_feedback_similarity(clean1: str, clean2: str) -> float:
+    if not clean1 or not clean2:
+        return 0.0
+
+    from difflib import SequenceMatcher
+
+    similarity = SequenceMatcher(None, clean1, clean2).ratio()
+    words1 = set(clean1.split())
+    words2 = set(clean2.split())
+    common_words = words1.intersection(words2)
+    word_boost = len(common_words) / max(len(words1), len(words2), 1) * 0.2
+    return min(similarity + word_boost, 1.0)
+
+
+def _find_repeating_components(
+    feedback_items: list,
+    similarity_threshold: float = 0.4,
+) -> list[list[int]]:
+    """Build bounded near-duplicate components without all-pairs comparison."""
+    from collections import Counter, defaultdict
+
+    item_texts = [
+        item.get("Feedback", "") or item.get("Feedback_Gist", "")
+        for item in feedback_items
+    ]
+    cleaned = [_clean_similarity_text(text) for text in item_texts]
+    parents = list(range(len(feedback_items)))
+
+    def find(index):
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(first, second):
+        first_root = find(first)
+        second_root = find(second)
+        if first_root != second_root:
+            parents[second_root] = first_root
+
+    exact_representatives = {}
+    token_index = defaultdict(list)
+    max_bucket_candidates = 50
+    max_candidates_per_item = 100
+
+    for index, clean_text in enumerate(cleaned):
+        if not clean_text:
+            continue
+
+        exact_match = exact_representatives.get(clean_text)
+        if exact_match is not None:
+            union(exact_match, index)
+            continue
+        exact_representatives[clean_text] = index
+
+        tokens = list(dict.fromkeys(clean_text.split()))[:64]
+        candidate_counts = Counter()
+        for token in tokens:
+            for candidate in token_index[token][-max_bucket_candidates:]:
+                candidate_counts[candidate] += 1
+
+        candidates = sorted(
+            candidate_counts,
+            key=lambda candidate: (
+                -candidate_counts[candidate],
+                abs(len(clean_text) - len(cleaned[candidate])),
+                candidate,
+            ),
+        )[:max_candidates_per_item]
+        for candidate in candidates:
+            similarity = _calculate_feedback_similarity(
+                clean_text,
+                cleaned[candidate],
+            )
+            if similarity >= similarity_threshold:
+                union(candidate, index)
+
+        for token in tokens:
+            token_index[token].append(index)
+
+    components = defaultdict(list)
+    for index, clean_text in enumerate(cleaned):
+        if clean_text:
+            components[find(index)].append(index)
+    return [
+        indexes
+        for indexes in components.values()
+        if len(indexes) > 1
+    ]
+
+
 def find_similar_feedback(
     feedback_text: str, all_feedback: list, similarity_threshold: float = 0.7, exclude_self: bool = True
 ) -> list:
@@ -991,38 +1108,7 @@ def find_similar_feedback(
     if not feedback_text or not all_feedback:
         return []
 
-    from difflib import SequenceMatcher
-    import re
-
-    def clean_text(text):
-        """Clean and normalize text for comparison"""
-        if not text:
-            return ""
-        # Convert to lowercase, remove extra whitespace, remove punctuation
-        text = re.sub(r"[^\w\s]", " ", text.lower())
-        text = re.sub(r"\s+", " ", text).strip()
-        return text
-
-    def calculate_similarity(text1, text2):
-        """Calculate similarity between two texts"""
-        clean1 = clean_text(text1)
-        clean2 = clean_text(text2)
-
-        if not clean1 or not clean2:
-            return 0.0
-
-        # Use SequenceMatcher for similarity
-        similarity = SequenceMatcher(None, clean1, clean2).ratio()
-
-        # Boost similarity for exact keyword matches
-        words1 = set(clean1.split())
-        words2 = set(clean2.split())
-        common_words = words1.intersection(words2)
-        word_boost = len(common_words) / max(len(words1), len(words2), 1) * 0.2
-
-        return min(similarity + word_boost, 1.0)
-
-    clean_input = clean_text(feedback_text)
+    clean_input = _clean_similarity_text(feedback_text)
     similar_items = []
 
     for item in all_feedback:
@@ -1034,7 +1120,10 @@ def find_similar_feedback(
         if exclude_self and item_text == feedback_text:
             continue
 
-        similarity = calculate_similarity(feedback_text, item_text)
+        similarity = _calculate_feedback_similarity(
+            clean_input,
+            _clean_similarity_text(item_text),
+        )
 
         if similarity >= similarity_threshold:
             similar_items.append(
@@ -1157,51 +1246,74 @@ def analyze_repeating_requests(feedback_items: list) -> dict:
 
         return [w for w in words if w not in stop_words]
 
-    # Group similar feedback by clustering
-    clusters = []
-    processed = set()
-    total_clustered_items = 0  # Track total items that are part of any cluster
-
     logger.info(f"Starting repeating request analysis with {len(feedback_items)} items")
-
-    for i, item in enumerate(feedback_items):
-        if i in processed:
-            continue
-
-        item_text = item.get("Feedback", "") or item.get("Feedback_Gist", "")
-        if not item_text:
-            continue
-
-        # Find similar items with a balanced threshold for clustering
-        similar_items = find_similar_feedback(item_text, feedback_items, similarity_threshold=0.4, exclude_self=False)
-
-        # Filter out the current item from similar items to avoid self-inclusion
-        similar_items = [si for si in similar_items if si["feedback_item"] is not item]
-
-        # Only create a cluster if there are actually similar items (i.e., repetitions)
-        if similar_items:
-            cluster_items = [item] + [si["feedback_item"] for si in similar_items]
-            cluster = {
-                "primary_item": item,
+    components = _find_repeating_components(feedback_items)
+    clusters = []
+    total_clustered_items = sum(len(component) for component in components)
+    for component in components:
+        primary_item = feedback_items[component[0]]
+        primary_text = (
+            primary_item.get("Feedback", "")
+            or primary_item.get("Feedback_Gist", "")
+        )
+        clean_primary = _clean_similarity_text(primary_text)
+        similar_items = []
+        cluster_items = [primary_item]
+        for index in component[1:]:
+            feedback_item = feedback_items[index]
+            item_text = (
+                feedback_item.get("Feedback", "")
+                or feedback_item.get("Feedback_Gist", "")
+            )
+            similarity = _calculate_feedback_similarity(
+                clean_primary,
+                _clean_similarity_text(item_text),
+            )
+            similar_items.append(
+                {
+                    "feedback_item": feedback_item,
+                    "similarity": round(similarity, 3),
+                    "matched_text": (
+                        item_text[:100] + "..."
+                        if len(item_text) > 100
+                        else item_text
+                    ),
+                }
+            )
+            cluster_items.append(feedback_item)
+        similar_items.sort(
+            key=lambda similar: similar["similarity"],
+            reverse=True,
+        )
+        clusters.append(
+            {
+                "primary_item": primary_item,
                 "similar_items": similar_items,
-                "count": len(cluster_items),  # Total items in this cluster
-                "keywords": extract_keywords(item_text),
-                "sources": list(set([ci.get("Sources", "Unknown") for ci in cluster_items])),
-                "audiences": list(set([ci.get("Audience", "Unknown") for ci in cluster_items])),
-                "priorities": list(set([ci.get("Priority", "medium") for ci in cluster_items])),
+                "count": len(cluster_items),
+                "keywords": extract_keywords(primary_text),
+                "sources": sorted(
+                    {
+                        item.get("Sources", "Unknown")
+                        for item in cluster_items
+                    },
+                    key=lambda value: str(value or ""),
+                ),
+                "audiences": sorted(
+                    {
+                        item.get("Audience", "Unknown")
+                        for item in cluster_items
+                    },
+                    key=lambda value: str(value or ""),
+                ),
+                "priorities": sorted(
+                    {
+                        item.get("Priority", "medium")
+                        for item in cluster_items
+                    },
+                    key=lambda value: str(value or ""),
+                ),
             }
-            clusters.append(cluster)
-
-            # Mark all items in this cluster as processed
-            processed.add(i)
-            total_clustered_items += 1  # Count the primary item
-
-            for similar in similar_items:
-                for j, check_item in enumerate(feedback_items):
-                    if check_item is similar["feedback_item"] and j not in processed:
-                        processed.add(j)
-                        total_clustered_items += 1  # Count each similar item
-                        break
+        )
 
     # Sort clusters by count (most frequent first)
     clusters.sort(key=lambda x: x["count"], reverse=True)
@@ -1262,23 +1374,17 @@ def collapse_repeating_feedback_items(feedback_items: list) -> list:
     if not feedback_items:
         return []
 
-    analysis = analyze_repeating_requests(feedback_items)
-    repeating_clusters = analysis.get("repeating_clusters", [])
-    if not repeating_clusters:
+    components = _find_repeating_components(feedback_items)
+    if not components:
         return list(feedback_items)
 
-    primary_ids = set()
-    repeated_ids = set()
-
-    for cluster in repeating_clusters:
-        primary_item = cluster.get("primary_item")
-        if primary_item is not None:
-            primary_ids.add(id(primary_item))
-            repeated_ids.add(id(primary_item))
-
-        for similar_item in cluster.get("similar_items", []):
-            feedback_item = similar_item.get("feedback_item")
-            if feedback_item is not None:
-                repeated_ids.add(id(feedback_item))
-
-    return [item for item in feedback_items if id(item) not in repeated_ids or id(item) in primary_ids]
+    repeated_indexes = {
+        index
+        for component in components
+        for index in component[1:]
+    }
+    return [
+        item
+        for index, item in enumerate(feedback_items)
+        if index not in repeated_indexes
+    ]

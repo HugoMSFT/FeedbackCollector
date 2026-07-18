@@ -317,6 +317,18 @@ body {
   margin: 0;
 }
 
+.source-title-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.source-title-copy small {
+  color: var(--fabric-gray-90);
+  font-size: 12px;
+  font-weight: var(--font-weight-regular);
+}
+
 .source-status {
   font-size: 12px;
   padding: 4px 8px;
@@ -970,4 +982,3 @@ body {
 }
 
 /* Custom grid classes for dense mode if needed, but we'll try to use Bootstrap classes dynamically first */
-

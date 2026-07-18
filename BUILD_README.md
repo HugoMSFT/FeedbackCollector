@@ -1,193 +1,48 @@
-# FeedbackCollector Build Guide
+# Build guide
 
-This repository supports native builds on Windows, Linux, and macOS. The PowerShell scripts in this folder are Windows-specific helpers, and `build_package.py` is the portable build entrypoint.
+FeedbackCollector uses PyInstaller's `onedir` output. Build on each target
+operating system; PyInstaller does not cross-compile.
 
-## Cross-Platform Build
+## Portable build
 
-Build on the same operating system you want to run on. PyInstaller does not produce Windows binaries from macOS or Linux, and it does not produce macOS or Linux binaries from Windows.
-
-### Prerequisites
 ```bash
-pip install -r src/requirements.txt
-pip install pyinstaller
-```
-
-Optional for Fabric SQL support:
-- Install `pyodbc`
-- Install a compatible SQL Server ODBC driver for your OS
-
-### Build
-```bash
+python -m pip install -r src/requirements.txt
+python -m pip install -r requirements-dev.txt
 python build_package.py
 ```
 
 Output:
+
 ```text
 dist/FeedbackCollector/
 ```
 
-If a `.env` file exists at the repository root or in `src/`, the build script copies it to the packaged application root.
+On Windows, `Setup_Desktop_Build.ps1` installs the pinned dependencies.
+`Build.ps1` and `Build.bat` run the same portable build entry point.
 
-## Quick Start
+## Configuration and distribution
 
-### First Time Setup
-```powershell
-.\Setup_Desktop_Build.ps1
-```
+`.env` is intentionally absent from the PyInstaller specification and build
+scripts. Never add credentials to `datas` or copy them into `_internal`.
 
-This Windows helper will:
-- Create build directory at `D:\FeedbackCollector_Desktop_Build`
-- Copy all source files including .env
-- Install PyInstaller and dependencies
-- Prepare the environment for building
+Distribute the entire `dist/FeedbackCollector` directory. Each recipient must
+create a private `.env` next to `FeedbackCollector.exe` (or the platform
+executable) using `.env.template` as a reference.
 
-### Building the Executable
+Packaged feedback, taxonomy overrides, exports, and durable jobs are stored in
+the current user's application-data directory rather than under `dist/`.
+Replacing the application directory during an upgrade therefore preserves
+local data. On first launch, the application also migrates a legacy
+`data/feedback_store.db`, taxonomy overrides, and feedback CSVs found next to
+the executable.
 
-After making changes to the source code, rebuild:
+Fabric SQL additionally requires a compatible ODBC Driver for SQL Server on the
+target machine. The driver itself is not bundled.
 
-```powershell
-.\Update_And_Rebuild.ps1
-```
+## Validate a build
 
-Or double-click `Update_And_Rebuild.bat`
-
-This Windows helper will:
-1. ✅ Copy updated source files from `D:\FeedbackCollector\src`
-2. ✅ **Always copy the .env file** (credentials included)
-3. ✅ Rebuild the Windows executable with PyInstaller
-4. ✅ Create distributable in `D:\FeedbackCollector_Desktop_Build\dist\FeedbackCollector\`
-
-## Build Output
-
-The executable and all dependencies will be in:
-```
-D:\FeedbackCollector_Desktop_Build\dist\FeedbackCollector\
-├── FeedbackCollector.exe          # Main executable
-├── _internal\                      # Dependencies and resources
-│   ├── .env                        # Environment configuration
-│   ├── templates\                  # HTML templates
-│   ├── static\                     # CSS, JS, images
-│   ├── *.json                      # Configuration files
-│   └── [Python libraries]
-```
-
-## Running the Desktop App
-
-### From Build Directory
-```powershell
-cd D:\FeedbackCollector_Desktop_Build\dist\FeedbackCollector
-.\FeedbackCollector.exe
-```
-
-### Distributing
-To share the application:
-1. Copy the entire `FeedbackCollector` folder from `dist\`
-2. Recipient runs `FeedbackCollector.exe`
-3. **Important**: The .env file with credentials is included
-
-## File Structure
-
-```
-D:\FeedbackCollector\                    # Development
-├── src\                                  # Source code
-│   ├── .env                             # ← Always copied to build
-│   ├── app.py
-│   ├── run_web.py
-│   └── ...
-├── FeedbackCollector.spec               # PyInstaller configuration
-├── Setup_Desktop_Build.ps1              # First-time setup
-├── Update_And_Rebuild.ps1               # Build script
-└── Update_And_Rebuild.bat               # Build script (Windows)
-
-D:\FeedbackCollector_Desktop_Build\     # Build directory
-├── src\                                 # Copied source
-│   ├── .env                            # ← Copied credentials
-│   └── ...
-├── FeedbackCollector.spec              # Build spec
-├── build\                              # Temporary build files
-├── dist\FeedbackCollector\             # Final output
-│   ├── FeedbackCollector.exe
-│   └── _internal\
-│       └── .env                        # ← Included in distribution
-└── Update_And_Rebuild.ps1              # Local build script
-```
-
-## What Gets Included
-
-### Always Included (via spec file)
-- ✅ All Python source code
-- ✅ HTML templates
-- ✅ Static files (CSS, JS)
-- ✅ Configuration files (JSON)
-- ✅ **.env file** (with credentials)
-
-### Dependencies
-All Python packages from requirements.txt are bundled.
-
-## Build Options
-
-### Standard Build
-```powershell
-.\Update_And_Rebuild.ps1
-```
-
-### Clean Build (recommended after adding dependencies)
-The script automatically uses `--clean` flag.
-
-### Manual Build
-```powershell
-cd D:\FeedbackCollector_Desktop_Build
-python -m PyInstaller FeedbackCollector.spec --noconfirm --clean
-```
-
-## Troubleshooting
-
-### .env File Not Included
-- Check if `src\.env` exists in development directory
-- Script will show warning if .env is missing
-- Verify in `dist\FeedbackCollector\_internal\.env`
-
-### Build Fails
-1. Ensure Python is in PATH
-2. Check PyInstaller is installed: `python -m PyInstaller --version`
-3. Try clean build: already included in script
-
-### Missing Dependencies
-1. Update requirements.txt in development
-2. Re-run Setup_Desktop_Build.ps1
-3. Or manually: `pip install -r src\requirements.txt`
-
-### Executable Won't Run
-- Check console output for errors
-- Verify .env file exists in `_internal\` folder
-- Ensure ODBC driver installed on target machine
-
-## Security Notes
-
-⚠️ **Important**: The .env file contains sensitive credentials:
-- Reddit API keys
-- Azure/Fabric tokens
-- Database connection strings
-
-**Distribution Checklist**:
-- ✅ Ensure .env has correct, valid credentials
-- ✅ Only share with authorized users
-- ✅ Consider creating separate .env for distribution vs development
-- ✅ Rotate credentials if needed
-
-## When to Rebuild
-
-Rebuild after:
-- ✅ Changing Python code (*.py)
-- ✅ Updating templates or static files
-- ✅ Modifying configuration (JSON files)
-- ✅ Updating .env credentials
-- ✅ Adding new dependencies
-
-## Automation
-
-The `Update_And_Rebuild.ps1` script handles the complete workflow automatically. Just run it after making changes!
-
----
-
-**Last Updated**: November 2025
+1. Start the executable and open `http://localhost:5000`.
+2. Confirm local feedback can be viewed and edited without credentials.
+3. Confirm the distribution contains no `.env` file.
+4. If Fabric is configured, validate a short-lived token from the UI and run a
+   small write.

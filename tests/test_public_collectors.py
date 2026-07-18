@@ -35,7 +35,97 @@ class FakeSession:
         self.closed = True
 
 
+class FakeSubreddit:
+    def __init__(self, name, calls):
+        self.name = name
+        self.calls = calls
+
+    def search(self, query, **kwargs):
+        self.calls.append((self.name, query, kwargs))
+        return []
+
+
+class FakeReddit:
+    def __init__(self):
+        self.calls = []
+        self.closed = False
+
+    def subreddit(self, name):
+        return FakeSubreddit(name, self.calls)
+
+    def close(self):
+        self.closed = True
+
+
 class PublicCollectorTests(unittest.TestCase):
+    def test_subreddit_names_accept_lists_prefixes_urls_and_spaces(self):
+        names = collectors.normalize_subreddit_names(
+            [
+                "SQL Server, r/Database",
+                "https://www.reddit.com/r/MicrosoftFabric/",
+                "sqlserver",
+            ]
+        )
+
+        self.assertEqual(
+            names,
+            ["SQLServer", "Database", "MicrosoftFabric"],
+        )
+
+    def test_subreddit_names_reject_invalid_or_empty_values(self):
+        for value in ([], " ", ["valid", "not-valid"]):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    collectors.normalize_subreddit_names(value)
+
+    def test_reddit_distributes_limit_across_configured_subreddits(self):
+        reddit = FakeReddit()
+        with mock.patch.object(
+            collectors.praw,
+            "Reddit",
+            return_value=reddit,
+        ), mock.patch.object(
+            collectors.config,
+            "REDDIT_SUBREDDITS",
+            ["SQLServer"],
+        ), mock.patch.object(
+            collectors.config,
+            "KEYWORDS",
+            ["SQL Server"],
+        ):
+            collector = collectors.RedditCollector()
+            collector.configure(
+                {
+                    "subreddits": [
+                        "SQL Server",
+                        "r/Database",
+                        "MicrosoftFabric",
+                    ],
+                    "max_items": 5,
+                    "sort": "top",
+                    "time_filter": "year",
+                }
+            )
+            items = collector.collect()
+            collector.close()
+
+        self.assertEqual(items, [])
+        self.assertEqual(
+            [call[0] for call in reddit.calls],
+            ["SQLServer", "Database", "MicrosoftFabric"],
+        )
+        self.assertEqual(
+            [call[2]["limit"] for call in reddit.calls],
+            [2, 2, 1],
+        )
+        self.assertTrue(
+            all(call[2]["sort"] == "top" for call in reddit.calls)
+        )
+        self.assertTrue(
+            all(call[2]["time_filter"] == "year" for call in reddit.calls)
+        )
+        self.assertTrue(reddit.closed)
+
     def test_stack_exchange_queries_each_sql_product_tag(self):
         payloads = [
             {

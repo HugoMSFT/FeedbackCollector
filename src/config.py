@@ -1146,7 +1146,10 @@ IMPACT_TYPES_CONFIG = load_impact_types()
 # Source URLs
 MS_FABRIC_COMMUNITY_URL = "https://community.fabric.microsoft.com/t5/Fabric-platform-forums/ct-p/AC-Community"
 REDDIT_SUBREDDIT = os.getenv("REDDIT_SUBREDDIT", "SQLServer")
-REDDIT_SUBREDDITS = _env_list("REDDIT_SUBREDDITS", [REDDIT_SUBREDDIT])
+REDDIT_SUBREDDITS = _env_list(
+    "REDDIT_SUBREDDITS",
+    [REDDIT_SUBREDDIT, "Database", "MicrosoftFabric"],
+)
 GITHUB_REPO_OWNER = os.getenv("GITHUB_REPO_OWNER", "microsoft")
 GITHUB_REPO_NAME = os.getenv(
     "GITHUB_REPO_NAME", "vscode-mssql"

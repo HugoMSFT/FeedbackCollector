@@ -90,7 +90,13 @@ class FrontendSecurityRegressionTests(unittest.TestCase):
     def test_source_defaults_prioritize_sql_server_and_azure_sql(self):
         sources = self.read("src/static/js/source-configuration.js")
 
-        self.assertIn("this.configurationVersion = 2;", sources)
+        self.assertIn("this.configurationVersion = 3;", sources)
+        self.assertIn(
+            "subreddits: ['SQLServer', 'Database', 'MicrosoftFabric']",
+            sources,
+        )
+        self.assertIn('data-field="subreddits"', sources)
+        self.assertIn("this.parseSubreddits(input.value)", sources)
         self.assertIn("repo: 'vscode-mssql'", sources)
         self.assertIn("repo: 'SqlClient'", sources)
         self.assertIn("id: 'stackoverflow'", sources)

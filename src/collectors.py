@@ -16,6 +16,48 @@ from utils import generate_feedback_gist, categorize_feedback, enhanced_categori
 logger = logging.getLogger(__name__)
 
 
+def normalize_subreddit_names(value: Any) -> List[str]:
+    """Normalize subreddit names from a list or comma/newline-separated text."""
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, (list, tuple)):
+        values = list(value)
+    else:
+        raise ValueError("Subreddits must be a list or comma-separated text")
+
+    normalized = []
+    seen = set()
+    for raw_value in values:
+        if not isinstance(raw_value, str):
+            raise ValueError("Each subreddit must be text")
+        for entry in re.split(r"[,\r\n]+", raw_value):
+            name = entry.strip()
+            name = re.sub(
+                r"^https?://(?:www\.)?reddit\.com/r/",
+                "",
+                name,
+                flags=re.IGNORECASE,
+            )
+            name = re.sub(r"^/?r/", "", name, flags=re.IGNORECASE)
+            name = re.sub(r"\s+", "", name).strip("/")
+            if not name:
+                continue
+            if not re.fullmatch(r"[A-Za-z0-9_]{2,30}", name):
+                raise ValueError(
+                    f"Invalid subreddit name: {entry.strip()}"
+                )
+            key = name.casefold()
+            if key not in seen:
+                normalized.append(name)
+                seen.add(key)
+
+    if not normalized:
+        raise ValueError("Configure at least one subreddit")
+    if len(normalized) > 100:
+        raise ValueError("Configure no more than 100 subreddits")
+    return normalized
+
+
 def sentiment_fields(text: str) -> Dict[str, Any]:
     try:
         score = float(TextBlob(text or "").sentiment.polarity)
@@ -110,7 +152,15 @@ def _public_feedback_item(
 class RedditCollector:
     def __init__(self):
         self.max_items = config.MAX_ITEMS_PER_RUN
-        self.subreddits = getattr(config, 'REDDIT_SUBREDDITS', [config.REDDIT_SUBREDDIT])
+        self.subreddits = normalize_subreddit_names(
+            getattr(
+                config,
+                "REDDIT_SUBREDDITS",
+                [config.REDDIT_SUBREDDIT],
+            )
+        )
+        self.sort = "new"
+        self.time_filter = "month"
         logger.debug("Initializing Reddit collector")
 
         # Initialize with explicit configuration to avoid praw.ini lookup
@@ -138,11 +188,15 @@ class RedditCollector:
             self.max_items = settings["max_items"]
             logger.info(f"RedditCollector configured with max_items={self.max_items}")
         if "subreddits" in settings:
-            self.subreddits = settings["subreddits"]
+            self.subreddits = normalize_subreddit_names(settings["subreddits"])
             logger.info(f"RedditCollector configured with subreddits={self.subreddits}")
         elif "subreddit" in settings:
-            self.subreddits = [settings["subreddit"]]
+            self.subreddits = normalize_subreddit_names(settings["subreddit"])
             logger.info(f"RedditCollector configured with subreddit={settings['subreddit']}")
+        if "sort" in settings:
+            self.sort = settings["sort"]
+        if "time_filter" in settings:
+            self.time_filter = settings["time_filter"]
 
     def close(self):
         close = getattr(self.reddit, "close", None)
@@ -152,7 +206,8 @@ class RedditCollector:
     def collect(self) -> List[Dict[str, Any]]:
         feedback_items = []
         try:
-            for subreddit_name in self.subreddits:
+            base_limit, remainder = divmod(self.max_items, len(self.subreddits))
+            for index, subreddit_name in enumerate(self.subreddits):
                 logger.info(f"Collecting feedback from Reddit subreddit: r/{subreddit_name}")
                 logger.info(
                     "Using %s configured keywords for Reddit search",
@@ -161,8 +216,15 @@ class RedditCollector:
                 subreddit = self.reddit.subreddit(subreddit_name)
 
                 search_query = " OR ".join([f'"{k}"' for k in config.KEYWORDS])
-                per_sub_limit = max(1, self.max_items // len(self.subreddits))
-                submissions_generator = subreddit.search(search_query, sort="new", limit=per_sub_limit)
+                per_sub_limit = base_limit + (1 if index < remainder else 0)
+                if per_sub_limit == 0:
+                    continue
+                submissions_generator = subreddit.search(
+                    search_query,
+                    sort=self.sort,
+                    time_filter=self.time_filter,
+                    limit=per_sub_limit,
+                )
 
                 count = 0
                 for submission in submissions_generator:
@@ -194,7 +256,7 @@ class RedditCollector:
                             "Feedback": full_feedback_text,
                             "Matched_Keywords": matched_keywords,
                             "Url": reddit_url,
-                            "Area": "SQL Data Virtualization",
+                            "Area": "SQL Server and Azure SQL",
                             "Sources": "Reddit",
                             "Impacttype": self._determine_impact_type_content(submission.title + " " + submission.selftext),
                             "Scenario": "Customer",

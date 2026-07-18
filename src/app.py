@@ -32,6 +32,7 @@ from collectors import (
     RedditCollector,
     StackOverflowCollector,
     TechCommunityCollector,
+    normalize_subreddit_names,
 )
 from ado_client import get_working_ado_items
 import config
@@ -645,23 +646,32 @@ def _valid_source_configs(source_configs: Any, settings: Any) -> bool:
             return False
 
     reddit_config = source_configs.get("reddit", {})
-    for field in ("subreddit",):
-        if field in reddit_config and not _valid_taxonomy_text(
-            reddit_config[field],
-            100,
-        ):
+    configured_subreddits = reddit_config.get(
+        "subreddits",
+        reddit_config.get("subreddit"),
+    )
+    if configured_subreddits is not None:
+        try:
+            normalize_subreddit_names(configured_subreddits)
+        except ValueError:
             return False
-    if "subreddits" in reddit_config:
-        subreddits = reddit_config["subreddits"]
-        if (
-            not isinstance(subreddits, list)
-            or not 1 <= len(subreddits) <= 100
-            or any(
-                not _valid_taxonomy_text(subreddit, 100)
-                for subreddit in subreddits
-            )
-        ):
-            return False
+    if reddit_config.get("sort", "new") not in {
+        "relevance",
+        "hot",
+        "top",
+        "new",
+        "comments",
+    }:
+        return False
+    if reddit_config.get("timeFilter", "month") not in {
+        "hour",
+        "day",
+        "week",
+        "month",
+        "year",
+        "all",
+    }:
+        return False
 
     for source_name in ("github", "githubIssues"):
         repositories = source_configs.get(source_name, {}).get("repositories")
@@ -1028,7 +1038,12 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
             )
             _set_source_state("reddit", "running", message="Collecting...")
             reddit_config = source_configs["reddit"]
-            subreddits = reddit_config.get("subreddits", [reddit_config.get("subreddit", "SQLServer")])
+            subreddits = normalize_subreddit_names(
+                reddit_config.get(
+                    "subreddits",
+                    reddit_config.get("subreddit", "SQLServer"),
+                )
+            )
             logger.info(f"🔴 REDDIT: Collecting from {subreddits}")
 
             reddit_collector = RedditCollector()

@@ -1,11 +1,11 @@
 // Source Configuration Manager
 class SourceConfigManager {
     constructor() {
-        this.configurationVersion = 2;
+        this.configurationVersion = 3;
         this.sources = {
             reddit: {
                 enabled: false,
-                subreddit: 'SQLServer',
+                subreddits: ['SQLServer', 'Database', 'MicrosoftFabric'],
                 sort: 'new',
                 timeFilter: 'month',
                 postTypes: ['all'],
@@ -135,7 +135,7 @@ class SourceConfigManager {
                     ? config.sources
                     : {};
                 const sources = savedVersion < this.configurationVersion
-                    ? this.migrateLegacySources(storedSources)
+                    ? this.migrateLegacySources(storedSources, savedVersion)
                     : storedSources;
 
                 Object.entries(sources).forEach(([sourceId, source]) => {
@@ -153,6 +153,18 @@ class SourceConfigManager {
                 });
                 if (config.settings && typeof config.settings === 'object') {
                     this.settings = { ...this.settings, ...config.settings };
+                }
+                const redditSource = this.sources.reddit;
+                const redditValues = Object.prototype.hasOwnProperty.call(
+                    redditSource,
+                    'subreddits'
+                )
+                    ? redditSource.subreddits
+                    : redditSource.subreddit;
+                redditSource.subreddits = this.parseSubreddits(redditValues);
+                delete redditSource.subreddit;
+                if (!['relevance', 'hot', 'top', 'new', 'comments'].includes(redditSource.sort)) {
+                    redditSource.sort = 'new';
                 }
                 
                 // Ensure numeric settings are properly converted to integers
@@ -193,7 +205,7 @@ class SourceConfigManager {
         this.loadKeywords();
     }
 
-    migrateLegacySources(storedSources) {
+    migrateLegacySources(storedSources, savedVersion) {
         const sources = { ...storedSources };
         const legacyFabricRepos = new Set([
             'microsoft/microsoft-fabric-workload-development-sample',
@@ -216,12 +228,27 @@ class SourceConfigManager {
         const fabricSource = sources.fabricCommunity || {};
         const adoSource = sources.ado || {};
 
-        if (redditSource.subreddit === 'MicrosoftFabric') {
+        const isLegacyRedditDefault = (
+            redditSource.subreddit === 'MicrosoftFabric'
+            || (
+                savedVersion === 2
+                && redditSource.subreddit === 'SQLServer'
+                && redditSource.enabled === false
+                && Number(redditSource.maxItems) === 5
+            )
+        );
+        const migratedSubreddits = isLegacyRedditDefault
+            ? [...this.sources.reddit.subreddits]
+            : this.parseSubreddits(
+                redditSource.subreddits || redditSource.subreddit
+            );
+        if (Object.keys(redditSource).length > 0) {
             sources.reddit = {
                 ...redditSource,
-                enabled: false,
-                subreddit: this.sources.reddit.subreddit
+                enabled: isLegacyRedditDefault ? false : redditSource.enabled,
+                subreddits: migratedSubreddits
             };
+            delete sources.reddit.subreddit;
         }
         if (isLegacyFabricRepoSet(githubSource.repositories)) {
             sources.github = {
@@ -254,6 +281,30 @@ class SourceConfigManager {
         }
 
         return sources;
+    }
+
+    parseSubreddits(value) {
+        const values = Array.isArray(value) ? value : [value || ''];
+        const names = [];
+        const seen = new Set();
+
+        values.forEach((rawValue) => {
+            String(rawValue).split(/[,\r\n]+/).forEach((entry) => {
+                const name = entry
+                    .trim()
+                    .replace(/^https?:\/\/(?:www\.)?reddit\.com\/r\//i, '')
+                    .replace(/^\/?r\//i, '')
+                    .replace(/\s+/g, '')
+                    .replace(/^\/+|\/+$/g, '');
+                const key = name.toLowerCase();
+                if (name && !seen.has(key)) {
+                    names.push(name);
+                    seen.add(key);
+                }
+            });
+        });
+
+        return names;
     }
     
     async loadKeywords() {
@@ -541,6 +592,8 @@ class SourceConfigManager {
             value = parseInt(input.value);
         } else if (input.multiple) {
             value = Array.from(input.selectedOptions, (option) => option.value);
+        } else if (sourceId === 'reddit' && field === 'subreddits') {
+            value = this.parseSubreddits(input.value);
         }
         
         // Update source configuration
@@ -597,9 +650,19 @@ class SourceConfigManager {
         
         switch (sourceId) {
             case 'reddit':
-                if (!this.sources.reddit.subreddit) {
+                const subreddits = this.sources.reddit.subreddits || [];
+                if (subreddits.length === 0) {
                     isValid = false;
-                    message = 'Missing subreddit';
+                    message = 'Add a subreddit';
+                } else if (
+                    subreddits.some(
+                        (subreddit) => !/^[A-Za-z0-9_]{2,30}$/.test(subreddit)
+                    )
+                ) {
+                    isValid = false;
+                    message = 'Invalid subreddit';
+                } else {
+                    message = `${subreddits.length} subreddit${subreddits.length === 1 ? '' : 's'}`;
                 }
                 break;
             case 'github':
@@ -753,18 +816,23 @@ class SourceConfigManager {
             case 'reddit':
                 return `
                     <div class="config-field">
-                        <label class="fluent-label">Subreddit:</label>
-                        <input type="text" class="fluent-input source-input" 
-                               data-field="subreddit" value="${window.SafeDOM.escapeAttribute(source.subreddit)}">
+                        <label class="fluent-label">Subreddits:</label>
+                        <textarea class="fluent-input source-input"
+                                  data-field="subreddits" rows="3"
+                                  placeholder="SQLServer, Database, MicrosoftFabric">${window.SafeDOM.escapeHtml((source.subreddits || []).join(', '))}</textarea>
+                        <div class="source-info">
+                            <span>Separate names with commas or new lines. Spaces and r/ prefixes are removed.</span>
+                        </div>
                     </div>
                     <div class="config-field-row">
                         <div class="config-field">
                             <label class="fluent-label">Sort by:</label>
                             <select class="fluent-select source-input" data-field="sort">
+                                <option value="relevance" ${source.sort === 'relevance' ? 'selected' : ''}>Relevance</option>
                                 <option value="new" ${source.sort === 'new' ? 'selected' : ''}>New</option>
                                 <option value="hot" ${source.sort === 'hot' ? 'selected' : ''}>Hot</option>
                                 <option value="top" ${source.sort === 'top' ? 'selected' : ''}>Top</option>
-                                <option value="rising" ${source.sort === 'rising' ? 'selected' : ''}>Rising</option>
+                                <option value="comments" ${source.sort === 'comments' ? 'selected' : ''}>Most Comments</option>
                             </select>
                         </div>
                         <div class="config-field">

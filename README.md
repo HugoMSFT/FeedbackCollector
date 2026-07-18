@@ -87,7 +87,7 @@ Community remains available, but is disabled by default.
 | Hacker News | Enabled | None | Recent SQL Server and Azure SQL stories and comments |
 | DEV Community | Enabled | None | `sqlserver`, `azuresql`, and `mssql` posts |
 | GitHub Issues | Enabled | Optional token | SQL tooling repositories including `vscode-mssql`, `DacFx`, `SqlClient`, and `go-sqlcmd` |
-| Reddit | Disabled | Reddit API credentials | Configurable; defaults to `r/SQLServer` |
+| Reddit | Disabled | Reddit API credentials | Multiple communities; defaults to `r/SQLServer`, `r/Database`, and `r/MicrosoftFabric` |
 | GitHub Discussions | Disabled | GitHub token | Configurable repositories |
 | Fabric Community | Disabled | None | Microsoft Fabric |
 | Azure DevOps | Disabled | PAT and organization/project settings | Internal work items |
@@ -96,6 +96,11 @@ Public APIs enforce their own quotas. Keep per-source limits conservative,
 especially for the unauthenticated Stack Exchange and GitHub APIs. One failed or
 misconfigured source is reported in the progress drawer without discarding data
 successfully collected from other sources.
+
+In the Reddit source card, enter subreddit names separated by commas or new
+lines, for example `SQLServer, Database, MicrosoftFabric`. The UI accepts
+`r/SQLServer` and full Reddit community URLs too, removes spaces and prefixes,
+deduplicates names, and divides the configured item limit across the communities.
 
 ## Fabric SQL
 

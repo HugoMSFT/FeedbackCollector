@@ -476,6 +476,44 @@ class AppRouteTests(unittest.TestCase):
         self.assertIsInstance(captured["cancel_event"], threading.Event)
         self.assertEqual(captured["operation_id"], response.json["operation_id"])
 
+    def test_collection_accepts_multiple_normalized_subreddits(self):
+        captured = {}
+
+        def fake_collection_body(**kwargs):
+            captured.update(kwargs)
+            with app_module._state_lock:
+                app_module.collection_status["status"] = "completed"
+
+        request_body = {
+            "sources": {
+                "reddit": {
+                    "enabled": True,
+                    "subreddits": [
+                        "SQL Server",
+                        "r/Database",
+                        "MicrosoftFabric",
+                    ],
+                    "sort": "top",
+                    "timeFilter": "year",
+                    "maxItems": 5,
+                }
+            },
+            "settings": {},
+        }
+        with mock.patch.object(
+            app_module,
+            "_collect_feedback_body",
+            side_effect=fake_collection_body,
+        ), mock.patch.object(
+            app_module.threading,
+            "Thread",
+            ImmediateThread,
+        ):
+            response = self.client.post("/api/collect", json=request_body)
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(captured["request_config"], request_body)
+
     def test_collection_rejects_invalid_source_limit(self):
         response = self.client.post(
             "/api/collect",
@@ -490,6 +528,34 @@ class AppRouteTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+
+    def test_collection_rejects_invalid_subreddit_configuration(self):
+        invalid_name = self.client.post(
+            "/api/collect",
+            json={
+                "sources": {
+                    "reddit": {
+                        "enabled": True,
+                        "subreddits": ["SQLServer", "not-valid"],
+                    }
+                }
+            },
+        )
+        invalid_sort = self.client.post(
+            "/api/collect",
+            json={
+                "sources": {
+                    "reddit": {
+                        "enabled": True,
+                        "subreddits": ["SQLServer"],
+                        "sort": "rising",
+                    }
+                }
+            },
+        )
+
+        self.assertEqual(invalid_name.status_code, 400)
+        self.assertEqual(invalid_sort.status_code, 400)
 
     def test_collection_rejects_invalid_public_source_filters(self):
         invalid_days = self.client.post(

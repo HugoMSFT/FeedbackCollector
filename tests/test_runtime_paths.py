@@ -26,7 +26,10 @@ class RuntimePathTests(unittest.TestCase):
         self.assertEqual(
             path,
             os.path.abspath(
-                r"C:\Users\test\AppData\Local\FeedbackCollector"
+                os.path.join(
+                    r"C:\Users\test\AppData\Local",
+                    "FeedbackCollector",
+                )
             ),
         )
 

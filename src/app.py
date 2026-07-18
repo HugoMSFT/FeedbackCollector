@@ -22,7 +22,17 @@ from typing import Dict, Any, Optional
 from urllib.parse import urlparse
 import json
 
-from collectors import RedditCollector, FabricCommunityCollector, GitHubDiscussionsCollector, GitHubIssuesCollector, StackOverflowCollector, MicrosoftQandACollector, TechCommunityCollector
+from collectors import (
+    DevCommunityCollector,
+    FabricCommunityCollector,
+    GitHubDiscussionsCollector,
+    GitHubIssuesCollector,
+    HackerNewsCollector,
+    MicrosoftQandACollector,
+    RedditCollector,
+    StackOverflowCollector,
+    TechCommunityCollector,
+)
 from ado_client import get_working_ado_items
 import config
 import utils
@@ -86,9 +96,39 @@ def _raise_if_collection_cancelled(cancel_event):
         raise CollectionCancelled()
 
 
-def _run_collector(collector):
+def _run_collector(
+    collector,
+    *,
+    source_key=None,
+    source_label=None,
+    total_sources=None,
+):
     try:
         return collector.collect()
+    except CollectionCancelled:
+        raise
+    except Exception:
+        if not source_key or not source_label or total_sources is None:
+            raise
+        logger.exception("%s collection failed", source_label)
+        message = f"{source_label} failed. See the application log for details."
+        _mark_collection_source_completed(
+            source_label,
+            source_key,
+            0,
+            total_sources,
+        )
+        _set_source_state(
+            source_key,
+            "error",
+            count=0,
+            message=message,
+        )
+        with _state_lock:
+            collection_status.setdefault("source_errors", {})[
+                source_key
+            ] = message
+        return []
     finally:
         close = getattr(collector, "close", None)
         if callable(close):
@@ -117,7 +157,19 @@ def _mark_collection_source_completed(
 
 
 last_collected_feedback = []
-last_collection_summary = {"reddit": 0, "fabric": 0, "github": 0, "github_issues": 0, "stackoverflow": 0, "dba_stackexchange": 0, "msqa": 0, "techcommunity": 0, "total": 0}
+last_collection_summary = {
+    "reddit": 0,
+    "fabric": 0,
+    "github": 0,
+    "github_issues": 0,
+    "stackoverflow": 0,
+    "dba_stackexchange": 0,
+    "hacker_news": 0,
+    "dev_community": 0,
+    "msqa": 0,
+    "techcommunity": 0,
+    "total": 0,
+}
 
 # Collection progress tracking
 collection_status = {
@@ -152,6 +204,8 @@ SOURCE_LABELS = {
     "dba_stackexchange": "DBA Stack Exchange",
     "microsoftQA": "Microsoft Q&A",
     "techCommunity": "Tech Community",
+    "hackerNews": "Hacker News",
+    "devCommunity": "DEV Community",
 }
 COLLECTABLE_SOURCE_KEYS = {
     "reddit",
@@ -163,6 +217,8 @@ COLLECTABLE_SOURCE_KEYS = {
     "dbaStackExchange",
     "microsoftQA",
     "techCommunity",
+    "hackerNews",
+    "devCommunity",
 }
 
 
@@ -182,6 +238,8 @@ def _set_source_state(
     with _state_lock:
         states = collection_status.setdefault("source_states", {})
         entry = states.get(key, {"label": SOURCE_LABELS.get(key, key)})
+        if entry.get("state") == "error" and state == "success":
+            return
         entry["label"] = SOURCE_LABELS.get(key, entry.get("label", key))
         entry["state"] = state
         if count is not None:
@@ -623,6 +681,28 @@ def _valid_source_configs(source_configs: Any, settings: Any) -> bool:
             ):
                 return False
 
+    for source_name, field_name in (
+        ("stackoverflow", "tags"),
+        ("dbaStackExchange", "tags"),
+        ("hackerNews", "queries"),
+        ("devCommunity", "tags"),
+    ):
+        values = source_configs.get(source_name, {}).get(field_name)
+        if values is None:
+            continue
+        if (
+            not isinstance(values, list)
+            or not 1 <= len(values) <= 20
+            or any(not _valid_taxonomy_text(value, 100) for value in values)
+        ):
+            return False
+
+    days = source_configs.get("hackerNews", {}).get("days")
+    if days is not None and (
+        type(days) is not int or not 1 <= days <= 3650
+    ):
+        return False
+
     parent_id = source_configs.get("ado", {}).get("parentWorkItem")
     if parent_id is not None and (
         isinstance(parent_id, bool)
@@ -821,11 +901,19 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
 
         # Pre-flight validation for configured sources.
         #
-        # Don't fail the entire collection if Reddit is misconfigured -
-        # quietly drop it from this run and tell the user what happened
-        # via collection_status. The other sources can still produce
-        # useful data even when Reddit credentials are absent.
+        # Credential-dependent integrations are optional. Skip an unusable
+        # source while allowing public sources to complete the run.
         skipped_sources: Dict[str, str] = {}
+
+        def skip_source(source_key, message):
+            logger.warning("Skipping %s: %s", source_key, message)
+            skipped_sources[source_key] = message
+            if isinstance(source_configs.get(source_key), dict):
+                source_configs[source_key] = {
+                    **source_configs[source_key],
+                    "enabled": False,
+                }
+
         if "reddit" in enabled_sources:
             if (
                 not config.REDDIT_CLIENT_ID
@@ -837,17 +925,43 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                     "Add REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, and REDDIT_USER_AGENT "
                     "to .env to include Reddit in future runs."
                 )
-                logger.warning(f"⚠️ {msg}")
-                skipped_sources["reddit"] = msg
-                # Mutate the request copy so the rest of the function sees
-                # Reddit as disabled.
-                if isinstance(source_configs.get("reddit"), dict):
-                    source_configs["reddit"] = {
-                        **source_configs["reddit"],
-                        "enabled": False,
-                    }
-                enabled_sources = [s for s in enabled_sources if s != "reddit"]
-                total_sources = len(enabled_sources)
+                skip_source("reddit", msg)
+
+        if "github" in enabled_sources and not config.GITHUB_TOKEN:
+            skip_source(
+                "github",
+                "GitHub Discussions requires GITHUB_TOKEN - skipping. "
+                "GitHub Issues remains available without a token.",
+            )
+
+        if "ado" in enabled_sources:
+            parent_work_item_id = (
+                source_configs.get("ado", {}).get("parentWorkItem")
+                or config.ADO_PARENT_WORK_ITEM_ID
+            )
+            missing_ado_settings = [
+                name
+                for name, value in (
+                    ("ADO_PAT", config.ADO_PAT),
+                    ("ADO_ORG_URL", config.ADO_ORG_URL),
+                    ("ADO_PROJECT_NAME", config.ADO_PROJECT_NAME),
+                    ("ADO_PARENT_WORK_ITEM_ID", parent_work_item_id),
+                )
+                if not value
+            ]
+            if missing_ado_settings:
+                skip_source(
+                    "ado",
+                    "Azure DevOps configuration is incomplete - skipping. "
+                    f"Set {', '.join(missing_ado_settings)} or disable Azure DevOps.",
+                )
+
+        enabled_sources = [
+            key
+            for key, value in source_configs.items()
+            if value.get("enabled", False)
+        ]
+        total_sources = len(enabled_sources)
 
         if total_sources == 0:
             logger.warning("All enabled sources are unusable (skipped during pre-flight)")
@@ -902,6 +1016,8 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
         dba_stackexchange_feedback = []
         msqa_feedback = []
         techcommunity_feedback = []
+        hacker_news_feedback = []
+        dev_community_feedback = []
 
         # Collect from Reddit if enabled
         if source_configs.get("reddit", {}).get("enabled", False):
@@ -930,7 +1046,12 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                     }
                 )
 
-            reddit_feedback = _run_collector(reddit_collector)
+            reddit_feedback = _run_collector(
+                reddit_collector,
+                source_key="reddit",
+                source_label="Reddit",
+                total_sources=total_sources,
+            )
             _raise_if_collection_cancelled(cancel_event)
             logger.info(f"Reddit collector found {len(reddit_feedback)} items.")
             _mark_collection_source_completed(
@@ -971,7 +1092,12 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                     }
                 )
 
-            fabric_feedback = _run_collector(fabric_collector)
+            fabric_feedback = _run_collector(
+                fabric_collector,
+                source_key="fabricCommunity",
+                source_label="Fabric Community",
+                total_sources=total_sources,
+            )
             _raise_if_collection_cancelled(cancel_event)
             logger.info(f"Fabric Community collector found {len(fabric_feedback)} items.")
             _mark_collection_source_completed(
@@ -1005,8 +1131,12 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 # Fallback to single repo config for backward compatibility
                 repositories = [
                     {
-                        "owner": github_config.get("owner", "microsoft"),
-                        "repo": github_config.get("repo", "Microsoft-Fabric-workload-development-sample"),
+                        "owner": github_config.get(
+                            "owner", config.GITHUB_REPO_OWNER
+                        ),
+                        "repo": github_config.get(
+                            "repo", config.GITHUB_REPO_NAME
+                        ),
                         "enabled": True,
                     }
                 ]
@@ -1042,7 +1172,12 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                         }
                     )
 
-                repo_feedback = _run_collector(github_collector)
+                repo_feedback = _run_collector(
+                    github_collector,
+                    source_key="github",
+                    source_label="GitHub Discussions",
+                    total_sources=total_sources,
+                )
                 _raise_if_collection_cancelled(cancel_event)
                 logger.info(f"  ✓ Found {len(repo_feedback)} items from {repo_owner}/{repo_name}")
                 github_feedback.extend(repo_feedback)
@@ -1081,8 +1216,12 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 # Fallback to single repo config for backward compatibility
                 repositories = [
                     {
-                        "owner": github_issues_config.get("owner", "microsoft"),
-                        "repo": github_issues_config.get("repo", "Microsoft-Fabric-workload-development-sample"),
+                        "owner": github_issues_config.get(
+                            "owner", config.GITHUB_REPO_OWNER
+                        ),
+                        "repo": github_issues_config.get(
+                            "repo", config.GITHUB_REPO_NAME
+                        ),
                         "enabled": True,
                     }
                 ]
@@ -1116,7 +1255,12 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                     }
                 )
 
-                repo_feedback = _run_collector(github_issues_collector)
+                repo_feedback = _run_collector(
+                    github_issues_collector,
+                    source_key="githubIssues",
+                    source_label="GitHub Issues",
+                    total_sources=total_sources,
+                )
                 _raise_if_collection_cancelled(cancel_event)
                 logger.info(f"  ✓ Found {len(repo_feedback)} items from {repo_owner}/{repo_name}")
                 github_issues_feedback.extend(repo_feedback)
@@ -1159,10 +1303,35 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
             logger.info(f"🔗 AZURE DEVOPS: Collecting children of work item {parent_work_item_id}")
 
             # Get work items using the working client
-            ado_workitems = get_working_ado_items(
-                parent_work_item_id=parent_work_item_id,
-                top=ado_config.get("maxItems", config.MAX_ITEMS_PER_RUN),
-            )
+            try:
+                ado_workitems = get_working_ado_items(
+                    parent_work_item_id=parent_work_item_id,
+                    top=ado_config.get("maxItems", config.MAX_ITEMS_PER_RUN),
+                )
+            except CollectionCancelled:
+                raise
+            except Exception:
+                logger.exception("Azure DevOps collection failed")
+                ado_error = (
+                    "Azure DevOps failed. See the application log for details."
+                )
+                _mark_collection_source_completed(
+                    "Azure DevOps",
+                    "ado",
+                    0,
+                    total_sources,
+                )
+                _set_source_state(
+                    "ado",
+                    "error",
+                    count=0,
+                    message=ado_error,
+                )
+                with _state_lock:
+                    collection_status.setdefault("source_errors", {})[
+                        "ado"
+                    ] = ado_error
+                ado_workitems = []
             _raise_if_collection_cancelled(cancel_event)
             logger.info(f"📊 Working client found {len(ado_workitems)} children work items")
 
@@ -1271,11 +1440,17 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 {
                     "max_items": so_config.get(
                         "maxItems", config.MAX_ITEMS_PER_RUN
-                    )
+                    ),
+                    "tags": so_config.get("tags", so_collector.tags),
                 }
             )
 
-            stackoverflow_feedback = _run_collector(so_collector)
+            stackoverflow_feedback = _run_collector(
+                so_collector,
+                source_key="stackoverflow",
+                source_label="Stack Overflow",
+                total_sources=total_sources,
+            )
             _raise_if_collection_cancelled(cancel_event)
             logger.info(f"Stack Overflow collector found {len(stackoverflow_feedback)} items.")
             _mark_collection_source_completed(
@@ -1309,11 +1484,17 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 {
                     "max_items": dba_config.get(
                         "maxItems", config.MAX_ITEMS_PER_RUN
-                    )
+                    ),
+                    "tags": dba_config.get("tags", dba_collector.tags),
                 }
             )
 
-            dba_stackexchange_feedback = _run_collector(dba_collector)
+            dba_stackexchange_feedback = _run_collector(
+                dba_collector,
+                source_key="dbaStackExchange",
+                source_label="DBA Stack Exchange",
+                total_sources=total_sources,
+            )
             _raise_if_collection_cancelled(cancel_event)
             logger.info(f"DBA Stack Exchange collector found {len(dba_stackexchange_feedback)} items.")
             _mark_collection_source_completed(
@@ -1323,13 +1504,102 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 total_sources,
             )
             _set_source_state(
-                "dba_stackexchange",
+                "dbaStackExchange",
                 "success",
                 count=len(dba_stackexchange_feedback),
                 message=f"{len(dba_stackexchange_feedback)} items collected",
             )
             all_feedback.extend(dba_stackexchange_feedback)
             results["dbaStackExchange"] = {"count": len(dba_stackexchange_feedback), "completed": True}
+
+        # Collect from Hacker News if enabled
+        if source_configs.get("hackerNews", {}).get("enabled", False):
+            _raise_if_collection_cancelled(cancel_event)
+            _update_collection_status(
+                current_source="Hacker News",
+                message="Collecting SQL discussions from Hacker News...",
+            )
+            _set_source_state("hackerNews", "running", message="Collecting...")
+            hn_config = source_configs["hackerNews"]
+            hn_collector = HackerNewsCollector()
+            hn_collector.configure(
+                {
+                    "max_items": hn_config.get(
+                        "maxItems", config.MAX_ITEMS_PER_RUN
+                    ),
+                    "queries": hn_config.get("queries", hn_collector.queries),
+                    "days": hn_config.get("days", hn_collector.days),
+                }
+            )
+
+            hacker_news_feedback = _run_collector(
+                hn_collector,
+                source_key="hackerNews",
+                source_label="Hacker News",
+                total_sources=total_sources,
+            )
+            _raise_if_collection_cancelled(cancel_event)
+            _mark_collection_source_completed(
+                "Hacker News",
+                "hackerNews",
+                len(hacker_news_feedback),
+                total_sources,
+            )
+            _set_source_state(
+                "hackerNews",
+                "success",
+                count=len(hacker_news_feedback),
+                message=f"{len(hacker_news_feedback)} items collected",
+            )
+            all_feedback.extend(hacker_news_feedback)
+            results["hackerNews"] = {
+                "count": len(hacker_news_feedback),
+                "completed": True,
+            }
+
+        # Collect from DEV Community if enabled
+        if source_configs.get("devCommunity", {}).get("enabled", False):
+            _raise_if_collection_cancelled(cancel_event)
+            _update_collection_status(
+                current_source="DEV Community",
+                message="Collecting SQL posts from DEV Community...",
+            )
+            _set_source_state("devCommunity", "running", message="Collecting...")
+            dev_config = source_configs["devCommunity"]
+            dev_collector = DevCommunityCollector()
+            dev_collector.configure(
+                {
+                    "max_items": dev_config.get(
+                        "maxItems", config.MAX_ITEMS_PER_RUN
+                    ),
+                    "tags": dev_config.get("tags", dev_collector.tags),
+                }
+            )
+
+            dev_community_feedback = _run_collector(
+                dev_collector,
+                source_key="devCommunity",
+                source_label="DEV Community",
+                total_sources=total_sources,
+            )
+            _raise_if_collection_cancelled(cancel_event)
+            _mark_collection_source_completed(
+                "DEV Community",
+                "devCommunity",
+                len(dev_community_feedback),
+                total_sources,
+            )
+            _set_source_state(
+                "devCommunity",
+                "success",
+                count=len(dev_community_feedback),
+                message=f"{len(dev_community_feedback)} items collected",
+            )
+            all_feedback.extend(dev_community_feedback)
+            results["devCommunity"] = {
+                "count": len(dev_community_feedback),
+                "completed": True,
+            }
 
         # Collect from Microsoft Q&A if enabled
         if source_configs.get("microsoftQA", {}).get("enabled", False):
@@ -1351,7 +1621,12 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 }
             )
 
-            msqa_feedback = _run_collector(msqa_collector)
+            msqa_feedback = _run_collector(
+                msqa_collector,
+                source_key="microsoftQA",
+                source_label="Microsoft Q&A",
+                total_sources=total_sources,
+            )
             _raise_if_collection_cancelled(cancel_event)
             logger.info(f"Microsoft Q&A collector found {len(msqa_feedback)} items.")
             _mark_collection_source_completed(
@@ -1389,7 +1664,12 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 }
             )
 
-            techcommunity_feedback = _run_collector(tc_collector)
+            techcommunity_feedback = _run_collector(
+                tc_collector,
+                source_key="techCommunity",
+                source_label="Tech Community",
+                total_sources=total_sources,
+            )
             _raise_if_collection_cancelled(cancel_event)
             logger.info(f"Tech Community collector found {len(techcommunity_feedback)} items.")
             _mark_collection_source_completed(
@@ -1406,6 +1686,24 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
             )
             all_feedback.extend(techcommunity_feedback)
             results["techCommunity"] = {"count": len(techcommunity_feedback), "completed": True}
+
+        with _state_lock:
+            source_errors = dict(collection_status.get("source_errors", {}))
+        if source_errors and not all_feedback and len(source_errors) == total_sources:
+            with _state_lock:
+                collection_status.update(
+                    {
+                        "status": "error",
+                        "message": "All enabled sources failed",
+                        "end_time": datetime.now().isoformat(),
+                        "error_message": (
+                            "No source completed successfully. Review each source "
+                            "error in the progress drawer and application log."
+                        ),
+                        "progress": 100,
+                    }
+                )
+            return
 
         # Apply sentiment analysis to all feedback sources
         def add_sentiment_to_feedback(feedback_list, source_name):
@@ -1432,13 +1730,29 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
         github_issues_feedback = add_sentiment_to_feedback(github_issues_feedback, "GitHub Issues")
         stackoverflow_feedback = add_sentiment_to_feedback(stackoverflow_feedback, "Stack Overflow")
         dba_stackexchange_feedback = add_sentiment_to_feedback(dba_stackexchange_feedback, "DBA Stack Exchange")
+        hacker_news_feedback = add_sentiment_to_feedback(hacker_news_feedback, "Hacker News")
+        dev_community_feedback = add_sentiment_to_feedback(dev_community_feedback, "DEV Community")
         msqa_feedback = add_sentiment_to_feedback(msqa_feedback, "Microsoft Q&A")
         techcommunity_feedback = add_sentiment_to_feedback(techcommunity_feedback, "Tech Community")
 
         # Note: all_feedback was already built by extending with each source
         # No need to combine again as it would lose the items
         logger.info(
-            f"Final feedback counts: Reddit={len(reddit_feedback)}, Fabric={len(fabric_feedback)}, GitHub Discussions={len(github_feedback)}, GitHub Issues={len(github_issues_feedback)}, ADO={len(ado_feedback)}, SO={len(stackoverflow_feedback)}, DBA.SE={len(dba_stackexchange_feedback)}, MSQA={len(msqa_feedback)}, TechCommunity={len(techcommunity_feedback)}, Total={len(all_feedback)}"
+            "Final feedback counts: Reddit=%s, Fabric=%s, GitHub Discussions=%s, "
+            "GitHub Issues=%s, ADO=%s, SO=%s, DBA.SE=%s, Hacker News=%s, "
+            "DEV=%s, MSQA=%s, TechCommunity=%s, Total=%s",
+            len(reddit_feedback),
+            len(fabric_feedback),
+            len(github_feedback),
+            len(github_issues_feedback),
+            len(ado_feedback),
+            len(stackoverflow_feedback),
+            len(dba_stackexchange_feedback),
+            len(hacker_news_feedback),
+            len(dev_community_feedback),
+            len(msqa_feedback),
+            len(techcommunity_feedback),
+            len(all_feedback),
         )
 
         # Generate deterministic IDs for all feedback items BEFORE state initialization
@@ -1508,8 +1822,11 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 "ado": {"count": len(ado_feedback), "completed": True},
                 "stackoverflow": {"count": len(stackoverflow_feedback), "completed": True},
                 "dba_stackexchange": {"count": len(dba_stackexchange_feedback), "completed": True},
+                "hacker_news": {"count": len(hacker_news_feedback), "completed": True},
+                "dev_community": {"count": len(dev_community_feedback), "completed": True},
                 "microsoftQA": {"count": len(msqa_feedback), "completed": True},
                 "techCommunity": {"count": len(techcommunity_feedback), "completed": True},
+                "source_errors": source_errors,
                 "total": len(all_feedback),
             }
         logger.info(f"Total feedback items collected: {len(all_feedback)}")
@@ -1520,7 +1837,11 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 collection_status.update(
                     {
                         "status": "completed",
-                        "message": "Collection completed - no items found",
+                        "message": (
+                            "Collection completed with source warnings - no items found"
+                            if source_errors
+                            else "Collection completed - no items found"
+                        ),
                         "end_time": datetime.now().isoformat(),
                         "total_items": 0,
                         "current_source": "Completed",
@@ -1577,11 +1898,17 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
             return
 
         # Update status to completed
+        completion_message = (
+            f"Collection completed with {len(source_errors)} source warning(s) - "
+            f"{len(all_feedback)} items collected"
+            if source_errors
+            else f"Collection completed successfully - {len(all_feedback)} items collected"
+        )
         with _state_lock:
             collection_status.update(
                 {
                     "status": "completed",
-                    "message": f"Collection completed successfully - {len(all_feedback)} items collected",
+                    "message": completion_message,
                     "end_time": datetime.now().isoformat(),
                     "total_items": len(all_feedback),
                     "current_source": "Completed",

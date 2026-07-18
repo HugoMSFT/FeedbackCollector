@@ -8,6 +8,7 @@ from textblob import TextBlob
 import json
 import re
 import time
+import html
 import config
 from http_client import create_retry_session
 from utils import generate_feedback_gist, categorize_feedback, enhanced_categorize_feedback, clean_feedback_text
@@ -50,6 +51,60 @@ def find_matched_keywords(text: str, keywords: List[str]) -> List[str]:
         if keyword.lower() in text_lower:
             matched.append(keyword)
     return matched
+
+
+def _public_feedback_item(
+    *,
+    source_name: str,
+    title: str,
+    body: str,
+    url: str,
+    author: str,
+    created_at: str,
+    tags: List[str],
+    matched_keywords: List[str],
+    raw_metadata: Dict[str, Any],
+    impact_type: str,
+) -> Dict[str, Any]:
+    full_text = f"{title}\n\n{body}".strip()
+    enhanced_cat = enhanced_categorize_feedback(
+        full_text,
+        source=source_name,
+        scenario="Customer",
+        organization=source_name,
+    )
+    return {
+        "Feedback_Gist": generate_feedback_gist(full_text),
+        "Feedback": full_text,
+        "Title": title,
+        "Content": full_text,
+        "Url": url,
+        "Matched_Keywords": matched_keywords,
+        "Area": "SQL Server and Azure SQL",
+        "Sources": source_name,
+        "Source": source_name,
+        "Impacttype": impact_type,
+        "Scenario": "Customer",
+        "Customer": author,
+        "Author": author,
+        "Tag": ", ".join(tags),
+        "Created": created_at,
+        "Created_Date": created_at,
+        "Organization": source_name,
+        "Status": config.DEFAULT_STATUS,
+        "Created_by": config.SYSTEM_USER,
+        "Rawfeedback": json.dumps(raw_metadata),
+        **sentiment_fields(full_text),
+        "Category": enhanced_cat["legacy_category"],
+        "Enhanced_Category": enhanced_cat["primary_category"],
+        "Subcategory": enhanced_cat["subcategory"],
+        "Audience": enhanced_cat["audience"],
+        "Priority": enhanced_cat["priority"],
+        "Feature_Area": enhanced_cat["feature_area"],
+        "Categorization_Confidence": enhanced_cat["confidence"],
+        "Domains": enhanced_cat.get("domains", []),
+        "Primary_Domain": enhanced_cat.get("primary_domain"),
+    }
 
 
 class RedditCollector:
@@ -1049,9 +1104,29 @@ class ADOChildTasksCollector:
 class StackOverflowCollector:
     """Collects questions from Stack Overflow and DBA Stack Exchange via the Stack Exchange API."""
 
+    SITE_DEFAULTS = {
+        "stackoverflow": {
+            "name": "Stack Overflow",
+            "tags": [
+                "sql-server",
+                "azure-sql-database",
+                "azure-sql-managed-instance",
+            ],
+        },
+        "dba": {
+            "name": "DBA Stack Exchange",
+            "tags": ["sql-server", "azure-sql-database"],
+        },
+    }
+
     def __init__(self, site="stackoverflow"):
-        self.source_name = f"Stack Overflow" if site == "stackoverflow" else "DBA Stack Exchange"
+        site_defaults = self.SITE_DEFAULTS.get(
+            site,
+            {"name": f"Stack Exchange ({site})", "tags": ["sql-server"]},
+        )
+        self.source_name = site_defaults["name"]
         self.site = site
+        self.tags = list(site_defaults["tags"])
         self.api_base = getattr(config, "STACKEXCHANGE_API_BASE", "https://api.stackexchange.com/2.3")
         self.max_items = config.MAX_ITEMS_PER_RUN
         self.session = create_retry_session(
@@ -1070,6 +1145,12 @@ class StackOverflowCollector:
             logger.info(f"{self.source_name} configured with max_items={self.max_items}")
         if "site" in settings:
             self.site = settings["site"]
+            site_defaults = self.SITE_DEFAULTS.get(self.site)
+            if site_defaults:
+                self.source_name = site_defaults["name"]
+                self.tags = list(site_defaults["tags"])
+        if "tags" in settings:
+            self.tags = list(settings["tags"])
 
     def collect(self) -> List[Dict[str, Any]]:
         feedback_items = []
@@ -1078,32 +1159,42 @@ class StackOverflowCollector:
         if not keywords_to_use:
             logger.warning(f"{self.source_name}: No keywords configured, skipping.")
             return []
+        if not self.tags:
+            logger.warning(f"{self.source_name}: No product tags configured, skipping.")
+            return []
 
-        # Stack Exchange API: search with intitle for each keyword batch
-        # We'll search tagged with sql-server and use keyword terms
-        tags = "sql-server"
-        query_string = " ".join(keywords_to_use[:10])  # API limits query length
-
-        logger.info(f"Starting {self.source_name} collection with tags={tags}")
+        logger.info(
+            "Starting %s collection with tags=%s",
+            self.source_name,
+            ", ".join(self.tags),
+        )
 
         try:
-            page = 1
-            page_size = min(50, self.max_items)
+            seen_question_ids = set()
+            page_size = max(
+                1,
+                min(50, (self.max_items + len(self.tags) - 1) // len(self.tags)),
+            )
 
-            while len(feedback_items) < self.max_items and page <= 5:
+            for product_tag in self.tags:
+                if len(feedback_items) >= self.max_items:
+                    break
                 params = {
                     "order": "desc",
                     "sort": "activity",
-                    "q": query_string,
-                    "tagged": tags,
+                    "tagged": product_tag,
                     "site": self.site,
                     "pagesize": page_size,
-                    "page": page,
+                    "page": 1,
                     "filter": "withbody",
                 }
 
                 url = f"{self.api_base}/search/advanced"
-                logger.info(f"Fetching {self.source_name} page {page}")
+                logger.info(
+                    "Fetching %s questions tagged %s",
+                    self.source_name,
+                    product_tag,
+                )
                 response = self.session.get(
                     url,
                     params=params,
@@ -1123,15 +1214,17 @@ class StackOverflowCollector:
                     )
 
                 if not items:
-                    break
+                    continue
 
                 for item in items:
                     if len(feedback_items) >= self.max_items:
                         break
+                    question_id = item.get("question_id")
+                    if question_id in seen_question_ids:
+                        continue
+                    seen_question_ids.add(question_id)
 
                     title = item.get("title", "")
-                    # Decode HTML entities in title
-                    import html
                     title = html.unescape(title)
 
                     body = item.get("body", "")
@@ -1140,7 +1233,14 @@ class StackOverflowCollector:
 
                     full_text = f"{title}\n\n{body_text}"
 
-                    matched_keywords = find_matched_keywords(full_text, keywords_to_use)
+                    tags_list = item.get("tags", [])
+                    tag_hints = " ".join(
+                        str(tag).replace("-", " ") for tag in tags_list
+                    )
+                    matched_keywords = find_matched_keywords(
+                        f"{full_text}\n{tag_hints}",
+                        keywords_to_use,
+                    )
                     if not matched_keywords:
                         continue
 
@@ -1153,7 +1253,6 @@ class StackOverflowCollector:
                     answer_count = item.get("answer_count", 0)
                     is_answered = item.get("is_answered", False)
 
-                    tags_list = item.get("tags", [])
                     tag_value = ", ".join(tags_list)
 
                     gist = generate_feedback_gist(full_text)
@@ -1171,7 +1270,7 @@ class StackOverflowCollector:
                             "Feedback": full_text,
                             "Url": item_url,
                             "Matched_Keywords": matched_keywords,
-                            "Area": "SQL Data Virtualization",
+                            "Area": "SQL Server and Azure SQL",
                             "Sources": self.source_name,
                             "Impacttype": self._determine_impact_type(full_text, is_answered),
                             "Scenario": "Customer",
@@ -1182,7 +1281,7 @@ class StackOverflowCollector:
                             "Status": config.DEFAULT_STATUS,
                             "Created_by": config.SYSTEM_USER,
                             "Rawfeedback": json.dumps({
-                                "question_id": item.get("question_id"),
+                                "question_id": question_id,
                                 "score": score,
                                 "view_count": view_count,
                                 "answer_count": answer_count,
@@ -1205,11 +1304,9 @@ class StackOverflowCollector:
                         }
                     )
 
-                has_more = data.get("has_more", False)
-                if not has_more:
-                    break
-                page += 1
-                time.sleep(1)  # Respect rate limits
+                backoff = data.get("backoff")
+                if isinstance(backoff, int) and backoff > 0:
+                    time.sleep(min(backoff, 10))
 
         except Exception as e:
             logger.error(f"Error collecting from {self.source_name}: {e}", exc_info=True)
@@ -1231,6 +1328,268 @@ class StackOverflowCollector:
         if any(w in content_lower for w in ["not supported", "unsupported", "doesn't support", "cannot use"]):
             return "Unsupported Feature"
         return "Question"
+
+
+class HackerNewsCollector:
+    """Collect recent SQL Server and Azure SQL discussions through Algolia."""
+
+    def __init__(self):
+        self.source_name = "Hacker News"
+        self.api_url = "https://hn.algolia.com/api/v1/search_by_date"
+        self.queries = [
+            "SQL Server",
+            "Azure SQL Database",
+            "Azure SQL Managed Instance",
+        ]
+        self.days = 180
+        self.max_items = config.MAX_ITEMS_PER_RUN
+        self.session = create_retry_session(
+            {
+                "User-Agent": "FeedbackCollector/1.0",
+                "Accept": "application/json",
+            }
+        )
+
+    def close(self):
+        self.session.close()
+
+    def configure(self, settings: Dict[str, Any]):
+        if "max_items" in settings:
+            self.max_items = settings["max_items"]
+        if "queries" in settings:
+            self.queries = list(settings["queries"])
+        if "days" in settings:
+            self.days = settings["days"]
+
+    def collect(self) -> List[Dict[str, Any]]:
+        if not config.KEYWORDS:
+            logger.warning("%s: No keywords configured, skipping.", self.source_name)
+            return []
+        if not self.queries:
+            logger.warning("%s: No search queries configured, skipping.", self.source_name)
+            return []
+
+        feedback_items = []
+        seen_ids = set()
+        per_query = max(
+            1,
+            min(100, (self.max_items + len(self.queries) - 1) // len(self.queries)),
+        )
+        created_after = int(
+            datetime.now(timezone.utc).timestamp() - (self.days * 24 * 60 * 60)
+        )
+
+        for query in self.queries:
+            if len(feedback_items) >= self.max_items:
+                break
+            response = self.session.get(
+                self.api_url,
+                params={
+                    "query": query,
+                    "hitsPerPage": per_query,
+                    "numericFilters": f"created_at_i>{created_after}",
+                },
+                timeout=config.REQUEST_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise ValueError("Hacker News response was not an object")
+            hits = payload.get("hits", [])
+            if not isinstance(hits, list):
+                raise ValueError("Hacker News hits response was not a list")
+
+            for hit in hits:
+                if not isinstance(hit, dict):
+                    raise ValueError("Hacker News hit was not an object")
+                object_id = str(hit.get("objectID") or "")
+                if not object_id or object_id in seen_ids:
+                    continue
+                seen_ids.add(object_id)
+
+                title = html.unescape(
+                    str(hit.get("title") or hit.get("story_title") or query)
+                )
+                raw_body = hit.get("comment_text") or hit.get("story_text") or ""
+                body = html.unescape(
+                    BeautifulSoup(str(raw_body), "html.parser").get_text(
+                        separator=" ",
+                        strip=True,
+                    )
+                )
+                full_text = f"{title}\n\n{body}".strip()
+                matched_keywords = find_matched_keywords(
+                    f"{full_text}\n{query}",
+                    config.KEYWORDS,
+                )
+                if not matched_keywords:
+                    continue
+
+                feedback_items.append(
+                    _public_feedback_item(
+                        source_name=self.source_name,
+                        title=title,
+                        body=body,
+                        url=f"https://news.ycombinator.com/item?id={object_id}",
+                        author=str(hit.get("author") or "Anonymous"),
+                        created_at=str(hit.get("created_at") or ""),
+                        tags=[str(tag) for tag in hit.get("_tags", [])],
+                        matched_keywords=matched_keywords,
+                        raw_metadata={
+                            "object_id": object_id,
+                            "points": hit.get("points"),
+                            "num_comments": hit.get("num_comments"),
+                            "query": query,
+                        },
+                        impact_type=self._determine_impact_type(full_text),
+                    )
+                )
+
+        logger.info("Collected %s items from %s", len(feedback_items), self.source_name)
+        return feedback_items[: self.max_items]
+
+    def _determine_impact_type(self, content: str) -> str:
+        content_lower = content.lower()
+        if any(word in content_lower for word in ["error", "bug", "broken", "fail"]):
+            return "Bug"
+        if any(
+            word in content_lower
+            for word in ["wish", "feature", "request", "would be nice"]
+        ):
+            return "Feature Request"
+        if any(word in content_lower for word in ["slow", "latency", "performance"]):
+            return "Performance"
+        return "Feedback"
+
+
+class DevCommunityCollector:
+    """Collect SQL Server and Azure SQL posts through the public Forem API."""
+
+    TAG_HINTS = {
+        "sqlserver": "SQL Server",
+        "azuresql": "Azure SQL Database",
+        "mssql": "SQL Server",
+    }
+
+    def __init__(self):
+        self.source_name = "DEV Community"
+        self.api_url = "https://dev.to/api/articles"
+        self.tags = list(self.TAG_HINTS)
+        self.max_items = config.MAX_ITEMS_PER_RUN
+        self.session = create_retry_session(
+            {
+                "User-Agent": "FeedbackCollector/1.0",
+                "Accept": "application/json",
+            }
+        )
+
+    def close(self):
+        self.session.close()
+
+    def configure(self, settings: Dict[str, Any]):
+        if "max_items" in settings:
+            self.max_items = settings["max_items"]
+        if "tags" in settings:
+            self.tags = list(settings["tags"])
+
+    def collect(self) -> List[Dict[str, Any]]:
+        if not config.KEYWORDS:
+            logger.warning("%s: No keywords configured, skipping.", self.source_name)
+            return []
+        if not self.tags:
+            logger.warning("%s: No tags configured, skipping.", self.source_name)
+            return []
+
+        feedback_items = []
+        seen_ids = set()
+        per_tag = max(
+            1,
+            min(100, (self.max_items + len(self.tags) - 1) // len(self.tags)),
+        )
+
+        for tag in self.tags:
+            if len(feedback_items) >= self.max_items:
+                break
+            response = self.session.get(
+                self.api_url,
+                params={"tag": tag, "per_page": per_tag, "page": 1},
+                timeout=config.REQUEST_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            articles = response.json()
+            if not isinstance(articles, list):
+                raise ValueError("DEV Community response was not a list")
+
+            for article in articles:
+                if not isinstance(article, dict):
+                    raise ValueError("DEV Community article was not an object")
+                article_id = str(article.get("id") or "")
+                if not article_id or article_id in seen_ids:
+                    continue
+                seen_ids.add(article_id)
+
+                title = str(article.get("title") or "").strip()
+                description = str(article.get("description") or "").strip()
+                if not title:
+                    continue
+                full_text = f"{title}\n\n{description}".strip()
+                article_tags = article.get("tag_list", [])
+                if not isinstance(article_tags, list):
+                    article_tags = []
+                hint_text = " ".join(
+                    self.TAG_HINTS.get(str(article_tag), str(article_tag))
+                    for article_tag in article_tags
+                )
+                hint_text += f" {self.TAG_HINTS.get(tag, tag)}"
+                matched_keywords = find_matched_keywords(
+                    f"{full_text}\n{hint_text}",
+                    config.KEYWORDS,
+                )
+                if not matched_keywords:
+                    continue
+
+                user = article.get("user")
+                if not isinstance(user, dict):
+                    user = {}
+                author = str(user.get("name") or user.get("username") or "Anonymous")
+                feedback_items.append(
+                    _public_feedback_item(
+                        source_name=self.source_name,
+                        title=title,
+                        body=description,
+                        url=str(article.get("url") or ""),
+                        author=author,
+                        created_at=str(
+                            article.get("published_timestamp")
+                            or article.get("published_at")
+                            or ""
+                        ),
+                        tags=[str(value) for value in article_tags],
+                        matched_keywords=matched_keywords,
+                        raw_metadata={
+                            "article_id": article_id,
+                            "comments_count": article.get("comments_count"),
+                            "public_reactions_count": article.get(
+                                "public_reactions_count"
+                            ),
+                            "tag": tag,
+                        },
+                        impact_type=self._determine_impact_type(full_text),
+                    )
+                )
+
+        logger.info("Collected %s items from %s", len(feedback_items), self.source_name)
+        return feedback_items[: self.max_items]
+
+    def _determine_impact_type(self, content: str) -> str:
+        content_lower = content.lower()
+        if any(word in content_lower for word in ["error", "bug", "broken", "fail"]):
+            return "Bug"
+        if any(word in content_lower for word in ["feature", "request", "improve"]):
+            return "Feature Request"
+        if any(word in content_lower for word in ["slow", "latency", "performance"]):
+            return "Performance"
+        return "Feedback"
 
 
 class MicrosoftQandACollector:

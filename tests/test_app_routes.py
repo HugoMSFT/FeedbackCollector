@@ -23,6 +23,26 @@ class ImmediateThread:
         self.target()
 
 
+class EmptyPublicCollector:
+    queries = ["SQL Server"]
+    days = 30
+    tags = ["sqlserver"]
+
+    def configure(self, _settings):
+        return None
+
+    def collect(self):
+        return []
+
+    def close(self):
+        return None
+
+
+class FailingPublicCollector(EmptyPublicCollector):
+    def collect(self):
+        raise RuntimeError("upstream unavailable")
+
+
 class AppRouteTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -470,6 +490,130 @@ class AppRouteTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+
+    def test_collection_rejects_invalid_public_source_filters(self):
+        invalid_days = self.client.post(
+            "/api/collect",
+            json={
+                "sources": {
+                    "hackerNews": {
+                        "enabled": True,
+                        "queries": ["SQL Server"],
+                        "days": 0,
+                        "maxItems": 5,
+                    }
+                }
+            },
+        )
+        invalid_tags = self.client.post(
+            "/api/collect",
+            json={
+                "sources": {
+                    "devCommunity": {
+                        "enabled": True,
+                        "tags": "sqlserver",
+                        "maxItems": 5,
+                    }
+                }
+            },
+        )
+
+        self.assertEqual(invalid_days.status_code, 400)
+        self.assertEqual(invalid_tags.status_code, 400)
+
+    def test_missing_ado_config_is_skipped_while_public_sources_complete(self):
+        request_body = {
+            "sources": {
+                "ado": {
+                    "enabled": True,
+                    "parentWorkItem": "42",
+                    "maxItems": 5,
+                },
+                "hackerNews": {
+                    "enabled": True,
+                    "queries": ["SQL Server"],
+                    "days": 30,
+                    "maxItems": 5,
+                },
+            },
+            "settings": {},
+        }
+        with mock.patch.multiple(
+            app_module.config,
+            ADO_PAT=None,
+            ADO_ORG_URL=None,
+            ADO_PROJECT_NAME=None,
+            ADO_PARENT_WORK_ITEM_ID=None,
+        ), mock.patch.object(
+            app_module,
+            "HackerNewsCollector",
+            return_value=EmptyPublicCollector(),
+        ), mock.patch.object(
+            app_module,
+            "get_working_ado_items",
+        ) as get_ado_items, mock.patch.object(
+            app_module.threading,
+            "Thread",
+            ImmediateThread,
+        ):
+            response = self.client.post("/api/collect", json=request_body)
+
+        self.assertEqual(response.status_code, 202)
+        get_ado_items.assert_not_called()
+        with app_module._state_lock:
+            status = dict(app_module.collection_status)
+        self.assertEqual(status["status"], "completed")
+        self.assertEqual(status["source_states"]["ado"]["state"], "skipped")
+        self.assertEqual(
+            status["source_states"]["hackerNews"]["state"],
+            "success",
+        )
+
+    def test_failed_public_source_does_not_discard_other_source_run(self):
+        request_body = {
+            "sources": {
+                "hackerNews": {
+                    "enabled": True,
+                    "queries": ["SQL Server"],
+                    "days": 30,
+                    "maxItems": 5,
+                },
+                "devCommunity": {
+                    "enabled": True,
+                    "tags": ["sqlserver"],
+                    "maxItems": 5,
+                },
+            },
+            "settings": {},
+        }
+        with mock.patch.object(
+            app_module,
+            "HackerNewsCollector",
+            return_value=FailingPublicCollector(),
+        ), mock.patch.object(
+            app_module,
+            "DevCommunityCollector",
+            return_value=EmptyPublicCollector(),
+        ), mock.patch.object(
+            app_module.threading,
+            "Thread",
+            ImmediateThread,
+        ):
+            response = self.client.post("/api/collect", json=request_body)
+
+        self.assertEqual(response.status_code, 202)
+        with app_module._state_lock:
+            status = dict(app_module.collection_status)
+        self.assertEqual(status["status"], "completed")
+        self.assertIn("source warning", status["message"])
+        self.assertEqual(
+            status["source_states"]["hackerNews"]["state"],
+            "error",
+        )
+        self.assertEqual(
+            status["source_states"]["devCommunity"]["state"],
+            "success",
+        )
 
     def test_collection_rejects_unknown_or_empty_sources(self):
         unknown = self.client.post(

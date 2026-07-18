@@ -940,14 +940,36 @@ USER_KEYWORDS_FILE = os.path.join(DATA_DIR, "keywords.json")
 
 # Default keywords
 DEFAULT_KEYWORDS = [
-    "workload hub",
-    "Workload Development Kit",
-    "WDK",
-    "Develop Workloads",
-    "Marketplace",
-    "ISV",
-    "FET",
-    "Fabric Extensibility Toolkit",
+    "SQL Server",
+    "Microsoft SQL Server",
+    "Azure SQL",
+    "Azure SQL Database",
+    "Azure SQL Managed Instance",
+    "SQL Managed Instance",
+    "T-SQL",
+    "Transact-SQL",
+    "SQL Server Management Studio",
+    "SSMS",
+    "sqlcmd",
+    "DacFx",
+    "SQL database",
+    "database engine",
+    "query store",
+    "Always On",
+    "availability group",
+    "columnstore",
+    "tempdb",
+    "PolyBase",
+    "data virtualization",
+    "OPENROWSET",
+    "external tables",
+    "external table",
+    "Parquet",
+    "Delta",
+    "CETAS",
+    "CTAS",
+    "Fabric SQL database",
+    "Fabric Warehouse",
 ]
 
 
@@ -1123,19 +1145,19 @@ IMPACT_TYPES_CONFIG = load_impact_types()
 
 # Source URLs
 MS_FABRIC_COMMUNITY_URL = "https://community.fabric.microsoft.com/t5/Fabric-platform-forums/ct-p/AC-Community"
-REDDIT_SUBREDDIT = os.getenv("REDDIT_SUBREDDIT", "MicrosoftFabric")
+REDDIT_SUBREDDIT = os.getenv("REDDIT_SUBREDDIT", "SQLServer")
 REDDIT_SUBREDDITS = _env_list("REDDIT_SUBREDDITS", [REDDIT_SUBREDDIT])
 GITHUB_REPO_OWNER = os.getenv("GITHUB_REPO_OWNER", "microsoft")
 GITHUB_REPO_NAME = os.getenv(
-    "GITHUB_REPO_NAME", "Microsoft-Fabric-workload-development-sample"
+    "GITHUB_REPO_NAME", "vscode-mssql"
 )
 
 # Additional GitHub Repositories (can be configured in web interface)
 # Format: list of dicts with 'owner' and 'repo' keys
 ADDITIONAL_GITHUB_REPOS = [
     # Examples:
-    # {'owner': 'microsoft', 'repo': 'fabric-samples'},
-    # {'owner': 'microsoft', 'repo': 'powerbi-desktop'},
+    # {"owner": "microsoft", "repo": "DacFx"},
+    # {"owner": "dotnet", "repo": "SqlClient"},
 ]
 
 # Feedback State Management Configuration

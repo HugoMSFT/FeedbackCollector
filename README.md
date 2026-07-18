@@ -6,9 +6,9 @@ optionally be synchronized with Microsoft Fabric SQL.
 
 ## Capabilities
 
-- Collect from Reddit, GitHub Discussions and Issues, Azure DevOps, Microsoft
-  Fabric Community, Stack Overflow, DBA Stack Exchange, Microsoft Q&A, and
-  Microsoft Tech Community.
+- Collect from Stack Overflow, DBA Stack Exchange, Microsoft Q&A, Microsoft
+  Tech Community, Hacker News, DEV Community, GitHub Issues and Discussions,
+  Reddit, Azure DevOps, and Microsoft Fabric Community.
 - Categorize feedback, detect sentiment, identify duplicates, and track state,
   audience, domain, notes, and impact.
 - Persist feedback and edits in SQLite. Source runs use
@@ -72,6 +72,30 @@ All supported settings are listed in `.env.template`.
 
 Missing optional credentials disable only the corresponding integration.
 Collector HTTP requests use bounded timeouts and retry transient failures.
+
+## Feedback sources
+
+The default profile prioritizes SQL Server and Azure SQL Database. Fabric
+Community remains available, but is disabled by default.
+
+| Source | Default | Authentication | Product scope |
+| --- | --- | --- | --- |
+| Stack Overflow | Enabled | None | `sql-server`, `azure-sql-database`, `azure-sql-managed-instance` |
+| DBA Stack Exchange | Enabled | None | SQL Server and Azure SQL administration |
+| Microsoft Q&A | Enabled | None | SQL Server questions |
+| Microsoft Tech Community | Enabled | None | SQL Server and Azure SQL discussions |
+| Hacker News | Enabled | None | Recent SQL Server and Azure SQL stories and comments |
+| DEV Community | Enabled | None | `sqlserver`, `azuresql`, and `mssql` posts |
+| GitHub Issues | Enabled | Optional token | SQL tooling repositories including `vscode-mssql`, `DacFx`, `SqlClient`, and `go-sqlcmd` |
+| Reddit | Disabled | Reddit API credentials | Configurable; defaults to `r/SQLServer` |
+| GitHub Discussions | Disabled | GitHub token | Configurable repositories |
+| Fabric Community | Disabled | None | Microsoft Fabric |
+| Azure DevOps | Disabled | PAT and organization/project settings | Internal work items |
+
+Public APIs enforce their own quotas. Keep per-source limits conservative,
+especially for the unauthenticated Stack Exchange and GitHub APIs. One failed or
+misconfigured source is reported in the progress drawer without discarding data
+successfully collected from other sources.
 
 ## Fabric SQL
 

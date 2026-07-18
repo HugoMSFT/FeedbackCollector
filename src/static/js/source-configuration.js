@@ -1,31 +1,22 @@
 // Source Configuration Manager
 class SourceConfigManager {
     constructor() {
+        this.configurationVersion = 2;
         this.sources = {
             reddit: {
-                enabled: true,
-                subreddit: 'MicrosoftFabric',
+                enabled: false,
+                subreddit: 'SQLServer',
                 sort: 'new',
                 timeFilter: 'month',
                 postTypes: ['all'],
                 maxItems: 5
             },
             github: {
-                enabled: true,
+                enabled: false,
                 repositories: [
                     {
-                        owner: 'microsoft',
-                        repo: 'Microsoft-Fabric-workload-development-sample',
-                        enabled: true
-                    },
-                    {
-                        owner: 'microsoft',
-                        repo: 'fabric-extensibility-toolkit',
-                        enabled: true
-                    },
-                    {
-                        owner: 'microsoft',
-                        repo: 'Microsoft-fabric-tools-workload',
+                        owner: 'dotnet',
+                        repo: 'SqlClient',
                         enabled: true
                     }
                 ],
@@ -38,17 +29,32 @@ class SourceConfigManager {
                 repositories: [
                     {
                         owner: 'microsoft',
-                        repo: 'Microsoft-Fabric-workload-development-sample',
+                        repo: 'vscode-mssql',
                         enabled: true
                     },
                     {
                         owner: 'microsoft',
-                        repo: 'fabric-extensibility-toolkit',
+                        repo: 'sqltoolsservice',
                         enabled: true
                     },
                     {
                         owner: 'microsoft',
-                        repo: 'Microsoft-fabric-tools-workload',
+                        repo: 'DacFx',
+                        enabled: true
+                    },
+                    {
+                        owner: 'microsoft',
+                        repo: 'go-sqlcmd',
+                        enabled: true
+                    },
+                    {
+                        owner: 'dotnet',
+                        repo: 'SqlClient',
+                        enabled: true
+                    },
+                    {
+                        owner: 'microsoft',
+                        repo: 'mssql-docker',
                         enabled: true
                     }
                 ],
@@ -56,13 +62,42 @@ class SourceConfigManager {
                 labels: [],
                 maxItems: 5
             },
-            fabricCommunity: {
+            stackoverflow: {
+                enabled: true,
+                tags: ['sql-server', 'azure-sql-database', 'azure-sql-managed-instance'],
+                maxItems: 5
+            },
+            dbaStackExchange: {
+                enabled: true,
+                tags: ['sql-server', 'azure-sql-database'],
+                maxItems: 5
+            },
+            microsoftQA: {
                 enabled: true,
                 maxItems: 5
             },
-            ado: {
+            techCommunity: {
                 enabled: true,
-                parentWorkItem: '1319103',
+                maxItems: 5
+            },
+            hackerNews: {
+                enabled: true,
+                queries: ['SQL Server', 'Azure SQL Database', 'Azure SQL Managed Instance'],
+                days: 180,
+                maxItems: 5
+            },
+            devCommunity: {
+                enabled: true,
+                tags: ['sqlserver', 'azuresql', 'mssql'],
+                maxItems: 5
+            },
+            fabricCommunity: {
+                enabled: false,
+                maxItems: 5
+            },
+            ado: {
+                enabled: false,
+                parentWorkItem: '',
                 workItemTypes: ['Bug', 'Feature', 'User Story'],
                 states: ['New', 'Active', 'Resolved'],
                 maxItems: 5
@@ -91,13 +126,34 @@ class SourceConfigManager {
     }
     
     loadConfiguration() {
-        // Load from localStorage
         const savedConfig = localStorage.getItem('feedbackCollectorConfig');
         if (savedConfig) {
             try {
                 const config = JSON.parse(savedConfig);
-                this.sources = { ...this.sources, ...config.sources };
-                this.settings = { ...this.settings, ...config.settings };
+                const savedVersion = Number(config.version || 1);
+                const storedSources = config.sources && typeof config.sources === 'object'
+                    ? config.sources
+                    : {};
+                const sources = savedVersion < this.configurationVersion
+                    ? this.migrateLegacySources(storedSources)
+                    : storedSources;
+
+                Object.entries(sources).forEach(([sourceId, source]) => {
+                    if (
+                        this.sources[sourceId]
+                        && source
+                        && typeof source === 'object'
+                        && !Array.isArray(source)
+                    ) {
+                        this.sources[sourceId] = {
+                            ...this.sources[sourceId],
+                            ...source
+                        };
+                    }
+                });
+                if (config.settings && typeof config.settings === 'object') {
+                    this.settings = { ...this.settings, ...config.settings };
+                }
                 
                 // Ensure numeric settings are properly converted to integers
                 if (this.settings.maxItemsPerSource) {
@@ -124,6 +180,10 @@ class SourceConfigManager {
                         }
                     });
                 }
+
+                if (savedVersion < this.configurationVersion) {
+                    this.saveConfiguration();
+                }
             } catch (e) {
                 console.error('Error loading configuration:', e);
             }
@@ -131,6 +191,69 @@ class SourceConfigManager {
         
         // Load keywords from server
         this.loadKeywords();
+    }
+
+    migrateLegacySources(storedSources) {
+        const sources = { ...storedSources };
+        const legacyFabricRepos = new Set([
+            'microsoft/microsoft-fabric-workload-development-sample',
+            'microsoft/fabric-extensibility-toolkit',
+            'microsoft/microsoft-fabric-tools-workload'
+        ]);
+        const isLegacyFabricRepoSet = (repositories) => (
+            Array.isArray(repositories)
+            && repositories.length === legacyFabricRepos.size
+            && repositories.every((repo) => (
+                repo
+                && legacyFabricRepos.has(
+                    `${String(repo.owner).toLowerCase()}/${String(repo.repo).toLowerCase()}`
+                )
+            ))
+        );
+        const redditSource = sources.reddit || {};
+        const githubSource = sources.github || {};
+        const githubIssuesSource = sources.githubIssues || {};
+        const fabricSource = sources.fabricCommunity || {};
+        const adoSource = sources.ado || {};
+
+        if (redditSource.subreddit === 'MicrosoftFabric') {
+            sources.reddit = {
+                ...redditSource,
+                enabled: false,
+                subreddit: this.sources.reddit.subreddit
+            };
+        }
+        if (isLegacyFabricRepoSet(githubSource.repositories)) {
+            sources.github = {
+                ...githubSource,
+                enabled: false,
+                repositories: this.sources.github.repositories.map((repo) => ({ ...repo }))
+            };
+        }
+        if (isLegacyFabricRepoSet(githubIssuesSource.repositories)) {
+            sources.githubIssues = {
+                ...githubIssuesSource,
+                repositories: this.sources.githubIssues.repositories.map((repo) => ({ ...repo }))
+            };
+        }
+        if (
+            fabricSource.enabled === true
+            && Number(fabricSource.maxItems) === 5
+        ) {
+            sources.fabricCommunity = {
+                ...fabricSource,
+                enabled: false
+            };
+        }
+        if (String(adoSource.parentWorkItem || '') === '1319103') {
+            sources.ado = {
+                ...adoSource,
+                enabled: false,
+                parentWorkItem: ''
+            };
+        }
+
+        return sources;
     }
     
     async loadKeywords() {
@@ -146,6 +269,7 @@ class SourceConfigManager {
     
     saveConfiguration() {
         const config = {
+            version: this.configurationVersion,
             sources: this.sources,
             settings: this.settings
         };
@@ -412,7 +536,12 @@ class SourceConfigManager {
         const sourceCard = input.closest('.source-card');
         const sourceId = sourceCard.dataset.source;
         const field = input.dataset.field;
-        const value = input.type === 'checkbox' ? input.checked : input.value;
+        let value = input.type === 'checkbox' ? input.checked : input.value;
+        if (input.type === 'number') {
+            value = parseInt(input.value);
+        } else if (input.multiple) {
+            value = Array.from(input.selectedOptions, (option) => option.value);
+        }
         
         // Update source configuration
         if (field.includes('.')) {
@@ -509,34 +638,70 @@ class SourceConfigManager {
         
         const sourceConfigs = [
             {
-                id: 'reddit',
-                name: 'Reddit',
-                icon: 'bi bi-reddit',
-                description: 'Collect feedback from Reddit discussions'
+                id: 'stackoverflow',
+                name: 'Stack Overflow',
+                icon: 'bi bi-stack-overflow',
+                description: 'SQL Server and Azure SQL questions'
             },
             {
-                id: 'github',
-                name: 'GitHub Discussions',
-                icon: 'bi bi-github',
-                description: 'Collect feedback from GitHub repository discussions'
+                id: 'dbaStackExchange',
+                name: 'DBA Stack Exchange',
+                icon: 'bi bi-database',
+                description: 'Database administrator questions and issues'
+            },
+            {
+                id: 'microsoftQA',
+                name: 'Microsoft Q&A',
+                icon: 'bi bi-question-circle',
+                description: 'Microsoft SQL Server and Azure SQL questions'
+            },
+            {
+                id: 'techCommunity',
+                name: 'Microsoft Tech Community',
+                icon: 'bi bi-chat-square-text',
+                description: 'Public SQL Server and Azure SQL discussions'
+            },
+            {
+                id: 'hackerNews',
+                name: 'Hacker News',
+                icon: 'bi bi-newspaper',
+                description: 'Recent public SQL Server and Azure SQL discussions'
+            },
+            {
+                id: 'devCommunity',
+                name: 'DEV Community',
+                icon: 'bi bi-code-square',
+                description: 'Public Forem posts tagged for SQL Server and Azure SQL'
             },
             {
                 id: 'githubIssues',
                 name: 'GitHub Issues',
-                icon: 'bi bi-exclamation-circle',
-                description: 'Collect feedback from GitHub repository issues'
+                icon: 'bi bi-github',
+                description: 'Issues from SQL Server and Azure SQL tools'
+            },
+            {
+                id: 'reddit',
+                name: 'Reddit',
+                icon: 'bi bi-reddit',
+                description: 'Optional SQL community discussions (credentials required)'
+            },
+            {
+                id: 'github',
+                name: 'GitHub Discussions',
+                icon: 'bi bi-chat-dots',
+                description: 'Optional repository discussions (GitHub token required)'
             },
             {
                 id: 'fabricCommunity',
                 name: 'Fabric Community Forums',
                 icon: 'bi bi-people',
-                description: 'Collect feedback from Microsoft Fabric community'
+                description: 'Optional Microsoft Fabric community feedback'
             },
             {
                 id: 'ado',
                 name: 'Azure DevOps',
                 icon: 'bi bi-kanban',
-                description: 'Collect feedback from Azure DevOps work items'
+                description: 'Optional internal work items (credentials required)'
             }
         ];
         
@@ -560,7 +725,10 @@ class SourceConfigManager {
                 </label>
                 <div class="source-title">
                     <i class="${config.icon}"></i>
-                    ${config.name}
+                    <div class="source-title-copy">
+                        <span>${config.name}</span>
+                        <small>${config.description}</small>
+                    </div>
                 </div>
                 <span class="source-status ready">Ready</span>
                 <button class="fluent-button-icon btn-configure" aria-label="Configure ${config.name}">
@@ -659,7 +827,7 @@ class SourceConfigManager {
                             <input type="text" class="fluent-input" 
                                    id="newGithubRepoOwner" placeholder="Owner (e.g., microsoft)">
                             <input type="text" class="fluent-input" 
-                                   id="newGithubRepoName" placeholder="Repository (e.g., fabric-samples)">
+                                  id="newGithubRepoName" placeholder="Repository (e.g., SqlClient)">
                             <button class="fluent-button fluent-button-primary btn-add-github-repo">
                                 <i class="bi bi-plus"></i> Add
                             </button>
@@ -725,7 +893,7 @@ class SourceConfigManager {
                             <input type="text" class="fluent-input" 
                                    id="newRepoOwner" placeholder="Owner (e.g., microsoft)">
                             <input type="text" class="fluent-input" 
-                                   id="newRepoName" placeholder="Repository (e.g., fabric-samples)">
+                                  id="newRepoName" placeholder="Repository (e.g., vscode-mssql)">
                             <button class="fluent-button fluent-button-primary btn-add-repo">
                                 <i class="bi bi-plus"></i> Add
                             </button>
@@ -754,6 +922,56 @@ class SourceConfigManager {
                     </div>
                 `;
                 
+            case 'stackoverflow':
+            case 'dbaStackExchange':
+            case 'microsoftQA':
+            case 'techCommunity':
+            case 'hackerNews':
+            case 'devCommunity':
+                const publicSourceDetails = {
+                    stackoverflow: 'Uses the public Stack Exchange API for sql-server, azure-sql-database, and azure-sql-managed-instance.',
+                    dbaStackExchange: 'Uses the public Stack Exchange API for SQL Server and Azure SQL database administration.',
+                    microsoftQA: 'Searches public Microsoft Q&A results scoped to SQL Server.',
+                    techCommunity: 'Searches public Microsoft Tech Community discussions using the configured taxonomy.',
+                    hackerNews: 'Uses the public Hacker News Algolia API; no account or API key is required.',
+                    devCommunity: 'Uses the public DEV/Forem API for SQL Server, Azure SQL, and MSSQL tags.'
+                }[sourceId];
+                const publicTerms = source.tags || source.queries || [];
+                const publicTermsMarkup = publicTerms.length > 0
+                    ? `
+                        <div class="config-field">
+                            <label class="fluent-label">Product filters:</label>
+                            <div class="source-info">
+                                <span>${publicTerms.map((term) => window.SafeDOM.escapeHtml(term)).join(', ')}</span>
+                            </div>
+                        </div>
+                    `
+                    : '';
+                const ageMarkup = sourceId === 'hackerNews'
+                    ? `
+                        <div class="config-field">
+                            <label class="fluent-label">Lookback (days):</label>
+                            <input type="number" class="fluent-input source-input"
+                                   data-field="days" value="${window.SafeDOM.finiteNumber(source.days, 180)}"
+                                   min="1" max="3650">
+                        </div>
+                    `
+                    : '';
+                return `
+                    ${publicTermsMarkup}
+                    ${ageMarkup}
+                    <div class="config-field">
+                        <label class="fluent-label">Max Items:</label>
+                        <input type="number" class="fluent-input source-input"
+                               data-field="maxItems" value="${window.SafeDOM.finiteNumber(source.maxItems, 5)}"
+                               min="1" max="1000">
+                    </div>
+                    <div class="fluent-alert fluent-alert-info">
+                        <i class="bi bi-info-circle"></i>
+                        <div>${publicSourceDetails}</div>
+                    </div>
+                `;
+
             case 'fabricCommunity':
                 return `
                     <div class="config-field">

@@ -1,4 +1,5 @@
 import os
+import re
 import unittest
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -85,6 +86,25 @@ class FrontendSecurityRegressionTests(unittest.TestCase):
             insights,
         )
         self.assertIn("Connected - nothing to write", insights)
+
+    def test_source_defaults_prioritize_sql_server_and_azure_sql(self):
+        sources = self.read("src/static/js/source-configuration.js")
+
+        self.assertIn("this.configurationVersion = 2;", sources)
+        self.assertIn("repo: 'vscode-mssql'", sources)
+        self.assertIn("repo: 'SqlClient'", sources)
+        self.assertIn("id: 'stackoverflow'", sources)
+        self.assertIn("id: 'hackerNews'", sources)
+        self.assertIn("id: 'devCommunity'", sources)
+        self.assertRegex(
+            sources,
+            re.compile(r"fabricCommunity:\s*\{\s*enabled:\s*false"),
+        )
+        self.assertRegex(
+            sources,
+            re.compile(r"ado:\s*\{\s*enabled:\s*false"),
+        )
+        self.assertNotIn("parentWorkItem: '1319103'", sources)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,10 @@ class EnhancedCollectionManager {
         if (collectButton) {
             collectButton.addEventListener('click', () => this.startCollection());
         }
+        const quickCollectButton = document.getElementById('quickCollectFeedbackBtn');
+        if (quickCollectButton) {
+            quickCollectButton.addEventListener('click', () => this.startCollection());
+        }
         
         // Fabric write button
         const fabricButton = document.getElementById('writeToFabricBtn');
@@ -57,10 +61,20 @@ class EnhancedCollectionManager {
             return;
         }
         
+        window.sourceConfigManager?.syncQuickSetupFromDom();
+
         // Get configuration from source manager
         const config = window.sourceConfigManager?.getCollectionConfig();
         if (!config || Object.keys(config.sources).length === 0) {
             this.showAlert('Please enable at least one data source', 'error');
+            return;
+        }
+        if (
+            !String(config.settings?.topic || '').trim()
+            && (!Array.isArray(config.settings?.keywords) || config.settings.keywords.length === 0)
+        ) {
+            this.showAlert('Describe the feedback you want to find first.', 'warning');
+            document.getElementById('quickTopic')?.focus();
             return;
         }
         
@@ -664,7 +678,30 @@ class EnhancedCollectionManager {
                     : (typeof data === 'number' ? data : 0)
             );
             totalItems += count;
-            html += `${this._escape(this.getSourceDisplayName(source))}: ${count} items<br>`;
+            const coverage = (
+                typeof data === 'object'
+                && data.coverage
+                && typeof data.coverage === 'object'
+            ) ? data.coverage : {};
+            const scanned = window.SafeDOM.finiteNumber(
+                coverage.candidates_scanned,
+                0
+            );
+            const pages = window.SafeDOM.finiteNumber(
+                coverage.pages_fetched,
+                0
+            );
+            const replies = window.SafeDOM.finiteNumber(
+                coverage.replies_collected,
+                0
+            );
+            html += `${this._escape(this.getSourceDisplayName(source))}: ${count} items`;
+            if (scanned > 0) {
+                html += ` <span class="text-muted">(${scanned} candidates, ${pages} pages`;
+                if (replies > 0) html += `, ${replies} replies`;
+                html += ')</span>';
+            }
+            html += '<br>';
         });
         
         html += `<strong>Total: ${totalItems} items</strong>`;
@@ -962,9 +999,16 @@ class EnhancedCollectionManager {
         const names = {
             'reddit': 'Reddit',
             'github': 'GitHub',
+            'githubIssues': 'GitHub Issues',
             'fabricCommunity': 'Fabric Community',
             'fabric': 'Fabric Community',  // Handle both naming conventions
-            'ado': 'Azure DevOps'
+            'ado': 'Azure DevOps',
+            'stackoverflow': 'Stack Overflow',
+            'dbaStackExchange': 'DBA Stack Exchange',
+            'hackerNews': 'Hacker News',
+            'devCommunity': 'DEV Community',
+            'microsoftQA': 'Microsoft Q&A',
+            'techCommunity': 'Microsoft SQL Blogs'
         };
         return names[source] || source;
     }

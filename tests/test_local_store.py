@@ -62,6 +62,65 @@ class LocalStoreTests(unittest.TestCase):
         self.assertEqual(item["Title"], "Newest title")
         self.assertEqual(item["Primary_Domain"], "User choice")
 
+    def test_source_identity_and_url_are_first_class_columns(self):
+        self.store.upsert_feedback_items(
+            [
+                {
+                    "Feedback_ID": "stable-id",
+                    "External_ID": "issue:123",
+                    "Sources": "GitHub Issues",
+                    "Source_URL": "https://github.com/example/repo/issues/123",
+                    "Url": "https://github.com/example/repo/issues/123",
+                }
+            ]
+        )
+
+        item = self.store.load_all()[0]
+        self.assertEqual(item["External_ID"], "issue:123")
+        self.assertEqual(
+            item["Source_URL"],
+            "https://github.com/example/repo/issues/123",
+        )
+
+    def test_canonical_url_reconciles_legacy_identity(self):
+        self.store.upsert_feedback_items(
+            [
+                {
+                    "Feedback_ID": "legacy-id",
+                    "Sources": "Reddit",
+                    "Source_URL": (
+                        "https://www.reddit.com/r/sql/comments/abc/"
+                        "?utm_source=legacy#reply"
+                    ),
+                    "Feedback": "Original",
+                }
+            ]
+        )
+        self.store.update_state(
+            "legacy-id",
+            notes="Keep this note",
+        )
+
+        self.store.upsert_feedback_items(
+            [
+                {
+                    "Feedback_ID": "new-generated-id",
+                    "External_ID": "submission:abc",
+                    "Sources": "Reddit",
+                    "Source_URL": (
+                        "https://www.reddit.com/r/sql/comments/abc"
+                    ),
+                    "Feedback": "Updated",
+                }
+            ]
+        )
+
+        items = self.store.load_all()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["Feedback_ID"], "legacy-id")
+        self.assertEqual(items[0]["Feedback_Notes"], "Keep this note")
+        self.assertEqual(items[0]["Feedback"], "Updated")
+
     def test_manual_categorization_preserves_all_category_fields(self):
         self.store.upsert_feedback_items(
             [

@@ -42,6 +42,13 @@ from runtime_paths import DATA_DIR, STATIC_DIR, TEMPLATES_DIR, LOCAL_DB_PATH
 from local_store import LocalStore
 from job_manager import JobManager
 from fabric_sql_writer import FabricWriteCancelled
+from search_plan import (
+    CoverageStats,
+    build_search_profile,
+    is_before_cutoff,
+    match_topic,
+    prepare_feedback_item,
+)
 from app_security import (
     clear_fabric_token as clear_server_fabric_token,
     configure_app_security,
@@ -204,7 +211,7 @@ SOURCE_LABELS = {
     "dbaStackExchange": "DBA Stack Exchange",
     "dba_stackexchange": "DBA Stack Exchange",
     "microsoftQA": "Microsoft Q&A",
-    "techCommunity": "Tech Community",
+    "techCommunity": "Microsoft SQL Blogs",
     "hackerNews": "Hacker News",
     "devCommunity": "DEV Community",
 }
@@ -631,6 +638,51 @@ def _valid_source_configs(source_configs: Any, settings: Any) -> bool:
     ):
         return False
 
+    topic = settings.get("topic")
+    if topic is not None and (
+        not isinstance(topic, str) or len(topic) > 1000
+    ):
+        return False
+    for list_field, max_values in (
+        ("searchTerms", 100),
+        ("excludedTerms", 50),
+        ("keywords", 500),
+    ):
+        values = settings.get(list_field)
+        if values is not None and (
+            not isinstance(values, list)
+            or len(values) > max_values
+            or any(
+                not _valid_taxonomy_text(value, 200)
+                for value in values
+            )
+        ):
+            return False
+    for boolean_field in (
+        "duplicateDetection",
+        "includeReplies",
+        "respectRateLimits",
+    ):
+        value = settings.get(boolean_field)
+        if value is not None and not isinstance(value, bool):
+            return False
+    time_range = settings.get("timeRangeMonths")
+    if time_range is not None and (
+        type(time_range) is not int or not 0 <= time_range <= 120
+    ):
+        return False
+    max_items = settings.get("maxItemsPerSource")
+    if max_items is not None and (
+        type(max_items) is not int or not 1 <= max_items <= 10000
+    ):
+        return False
+    candidate_multiplier = settings.get("candidateMultiplier")
+    if candidate_multiplier is not None and (
+        type(candidate_multiplier) is not int
+        or not 1 <= candidate_multiplier <= 100
+    ):
+        return False
+
     for source_config in source_configs.values():
         if not isinstance(source_config, dict):
             return False
@@ -713,6 +765,18 @@ def _valid_source_configs(source_configs: Any, settings: Any) -> bool:
     ):
         return False
 
+    feed_urls = source_configs.get("techCommunity", {}).get("feeds")
+    if feed_urls is not None and (
+        not isinstance(feed_urls, list)
+        or not feed_urls
+        or len(feed_urls) > len(config.MICROSOFT_SQL_FEEDS)
+        or any(
+            feed_url not in config.MICROSOFT_SQL_FEEDS
+            for feed_url in feed_urls
+        )
+    ):
+        return False
+
     parent_id = source_configs.get("ado", {}).get("parentWorkItem")
     if parent_id is not None and (
         isinstance(parent_id, bool)
@@ -721,6 +785,30 @@ def _valid_source_configs(source_configs: Any, settings: Any) -> bool:
     ):
         return False
     return True
+
+
+@app.route("/api/search-plan", methods=["POST"])
+def preview_search_plan():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"status": "error", "message": "Expected a JSON object."}), 400
+    if not _valid_source_configs({}, payload):
+        return jsonify({"status": "error", "message": "Invalid search settings."}), 400
+    profile = build_search_profile(payload, config.load_keywords())
+    return jsonify(
+        {
+            "status": "success",
+            "topic": profile.topic,
+            "search_terms": profile.terms,
+            "excluded_terms": profile.excluded_terms,
+            "created_after": (
+                profile.created_after.isoformat()
+                if profile.created_after
+                else None
+            ),
+            "include_replies": profile.include_replies,
+        }
+    )
 
 
 @app.route("/api/collect", methods=["POST"])
@@ -1013,6 +1101,92 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
         )
         logger.info(f"📝 Current keywords: {cfg.KEYWORDS}")
 
+        search_profile = build_search_profile(settings, cfg.KEYWORDS)
+        if not search_profile.terms:
+            with _state_lock:
+                collection_status.update(
+                    {
+                        "status": "error",
+                        "message": "Collection needs a topic",
+                        "end_time": datetime.now().isoformat(),
+                        "error_message": (
+                            "Describe the feedback you want to find or add "
+                            "at least one advanced search term."
+                        ),
+                    }
+                )
+            return
+
+        default_source_limit = settings.get(
+            "maxItemsPerSource",
+            config.MAX_ITEMS_PER_RUN,
+        )
+
+        def source_limit(source_config):
+            return source_config.get("maxItems", default_source_limit)
+
+        def collector_options(source_config, **overrides):
+            max_items = source_limit(source_config)
+            return {
+                "max_items": max_items,
+                **search_profile.collector_settings(max_items),
+                **overrides,
+            }
+
+        def collector_coverage(collector):
+            snapshot = getattr(collector, "coverage_snapshot", None)
+            return snapshot() if callable(snapshot) else {}
+
+        def merge_coverage(target, current):
+            for key in (
+                "candidates_scanned",
+                "matched",
+                "rejected",
+                "pages_fetched",
+                "queries_run",
+                "replies_collected",
+            ):
+                target[key] = target.get(key, 0) + int(
+                    current.get(key, 0) or 0
+                )
+            for key, choose_min in (
+                ("oldest_created", True),
+                ("newest_created", False),
+            ):
+                value = current.get(key)
+                if value and (
+                    not target.get(key)
+                    or (value < target[key] if choose_min else value > target[key])
+                ):
+                    target[key] = value
+            return target
+
+        def round_robin_limit(collections, limit):
+            merged = []
+            max_length = max(
+                (len(collection) for collection in collections),
+                default=0,
+            )
+            for index in range(max_length):
+                for collection in collections:
+                    if index < len(collection):
+                        merged.append(collection[index])
+                        if len(merged) >= limit:
+                            return merged
+            return merged
+
+        with _state_lock:
+            collection_status["search_plan"] = {
+                "topic": search_profile.topic,
+                "terms": search_profile.terms,
+                "created_after": (
+                    search_profile.created_after.isoformat()
+                    if search_profile.created_after
+                    else None
+                ),
+                "include_replies": search_profile.include_replies,
+            }
+
         all_feedback = []
         results = {}
 
@@ -1051,14 +1225,15 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
             # Pass configuration to collector if it supports it
             if hasattr(reddit_collector, "configure"):
                 reddit_collector.configure(
-                    {
-                        "subreddits": subreddits,
-                        "sort": reddit_config.get("sort", "new"),
-                        "time_filter": reddit_config.get("timeFilter", "month"),
-                        "max_items": reddit_config.get(
-                            "maxItems", config.MAX_ITEMS_PER_RUN
+                    collector_options(
+                        reddit_config,
+                        subreddits=subreddits,
+                        sort=reddit_config.get("sort", "new"),
+                        time_filter=reddit_config.get(
+                            "timeFilter",
+                            "month",
                         ),
-                    }
+                    )
                 )
 
             reddit_feedback = _run_collector(
@@ -1076,7 +1251,11 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 total_sources,
             )
             all_feedback.extend(reddit_feedback)
-            results["reddit"] = {"count": len(reddit_feedback), "completed": True}
+            results["reddit"] = {
+                "count": len(reddit_feedback),
+                "completed": True,
+                "coverage": collector_coverage(reddit_collector),
+            }
             _set_source_state(
                 "reddit",
                 "success",
@@ -1100,11 +1279,7 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
             # Pass configuration to collector if it supports it
             if hasattr(fabric_collector, "configure"):
                 fabric_collector.configure(
-                    {
-                        "max_items": fabric_config.get(
-                            "maxItems", config.MAX_ITEMS_PER_RUN
-                        )
-                    }
+                    collector_options(fabric_config)
                 )
 
             fabric_feedback = _run_collector(
@@ -1122,7 +1297,11 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 total_sources,
             )
             all_feedback.extend(fabric_feedback)
-            results["fabricCommunity"] = {"count": len(fabric_feedback), "completed": True}
+            results["fabricCommunity"] = {
+                "count": len(fabric_feedback),
+                "completed": True,
+                "coverage": collector_coverage(fabric_collector),
+            }
             _set_source_state(
                 "fabricCommunity",
                 "success",
@@ -1158,9 +1337,11 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
 
             # Filter to only enabled repositories
             enabled_repos = [r for r in repositories if r.get("enabled", True)]
+            github_limit = source_limit(github_config)
             logger.info(f"🐙 GITHUB DISCUSSIONS: Collecting from {len(enabled_repos)} repositories")
 
-            github_feedback = []
+            github_repo_results = []
+            github_coverage = {}
             for repo_config in enabled_repos:
                 _raise_if_collection_cancelled(cancel_event)
                 repo_owner = repo_config.get("owner")
@@ -1177,14 +1358,15 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 # Configure collector with specific repo
                 if hasattr(github_collector, "configure"):
                     github_collector.configure(
-                        {
-                            "owner": repo_owner,
-                            "repo": repo_name,
-                            "state": github_config.get("state", "all"),
-                            "max_items": github_config.get(
-                                "maxItems", config.MAX_ITEMS_PER_RUN
-                            ),
-                        }
+                        collector_options(
+                            {
+                                **github_config,
+                                "maxItems": github_limit,
+                            },
+                            owner=repo_owner,
+                            repo=repo_name,
+                            state=github_config.get("state", "all"),
+                        )
                     )
 
                 repo_feedback = _run_collector(
@@ -1195,8 +1377,16 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 )
                 _raise_if_collection_cancelled(cancel_event)
                 logger.info(f"  ✓ Found {len(repo_feedback)} items from {repo_owner}/{repo_name}")
-                github_feedback.extend(repo_feedback)
+                github_repo_results.append(repo_feedback)
+                merge_coverage(
+                    github_coverage,
+                    collector_coverage(github_collector),
+                )
 
+            github_feedback = round_robin_limit(
+                github_repo_results,
+                github_limit,
+            )
             logger.info(
                 f"GitHub Discussions collector found {len(github_feedback)} total items from {len(enabled_repos)} repositories."
             )
@@ -1207,7 +1397,12 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 total_sources,
             )
             all_feedback.extend(github_feedback)
-            results["github"] = {"count": len(github_feedback), "completed": True, "repositories": len(enabled_repos)}
+            results["github"] = {
+                "count": len(github_feedback),
+                "completed": True,
+                "repositories": len(enabled_repos),
+                "coverage": github_coverage,
+            }
             _set_source_state(
                 "github",
                 "success",
@@ -1243,9 +1438,11 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
 
             # Filter to only enabled repositories
             enabled_repos = [r for r in repositories if r.get("enabled", True)]
+            github_issues_limit = source_limit(github_issues_config)
             logger.info(f"🐙 GITHUB ISSUES: Collecting from {len(enabled_repos)} repositories")
 
-            github_issues_feedback = []
+            github_issue_repo_results = []
+            github_issues_coverage = {}
             for repo_config in enabled_repos:
                 _raise_if_collection_cancelled(cancel_event)
                 repo_owner = repo_config.get("owner")
@@ -1261,13 +1458,16 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
 
                 # Pass configuration to collector
                 github_issues_collector.configure(
-                    {
-                        "owner": repo_owner,
-                        "repo": repo_name,
-                        "max_items": github_issues_config.get(
-                            "maxItems", config.MAX_ITEMS_PER_RUN
-                        ),
-                    }
+                    collector_options(
+                        {
+                            **github_issues_config,
+                            "maxItems": github_issues_limit,
+                        },
+                        owner=repo_owner,
+                        repo=repo_name,
+                        state=github_issues_config.get("state", "all"),
+                        labels=github_issues_config.get("labels", []),
+                    )
                 )
 
                 repo_feedback = _run_collector(
@@ -1278,8 +1478,16 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 )
                 _raise_if_collection_cancelled(cancel_event)
                 logger.info(f"  ✓ Found {len(repo_feedback)} items from {repo_owner}/{repo_name}")
-                github_issues_feedback.extend(repo_feedback)
+                github_issue_repo_results.append(repo_feedback)
+                merge_coverage(
+                    github_issues_coverage,
+                    collector_coverage(github_issues_collector),
+                )
 
+            github_issues_feedback = round_robin_limit(
+                github_issue_repo_results,
+                github_issues_limit,
+            )
             logger.info(
                 f"GitHub Issues collector found {len(github_issues_feedback)} total items from {len(enabled_repos)} repositories."
             )
@@ -1300,6 +1508,7 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 "count": len(github_issues_feedback),
                 "completed": True,
                 "repositories": len(enabled_repos),
+                "coverage": github_issues_coverage,
             }
 
         # Collect from Azure DevOps if enabled
@@ -1318,10 +1527,18 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
             logger.info(f"🔗 AZURE DEVOPS: Collecting children of work item {parent_work_item_id}")
 
             # Get work items using the working client
+            ado_limit = source_limit(ado_config)
+            ado_candidate_limit = min(
+                config.MAX_ITEMS_PER_RUN,
+                max(
+                    ado_limit,
+                    ado_limit * search_profile.candidate_multiplier,
+                ),
+            )
             try:
                 ado_workitems = get_working_ado_items(
                     parent_work_item_id=parent_work_item_id,
-                    top=ado_config.get("maxItems", config.MAX_ITEMS_PER_RUN),
+                    top=ado_candidate_limit,
                 )
             except CollectionCancelled:
                 raise
@@ -1352,8 +1569,11 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
 
             # Convert work items to feedback format
             ado_feedback = []
+            ado_coverage = CoverageStats()
             for item in ado_workitems:
                 _raise_if_collection_cancelled(cancel_event)
+                if len(ado_feedback) >= ado_limit:
+                    break
                 work_item_id = item.get("id")
                 title = item.get("title", "")
                 description = item.get("description", "")
@@ -1380,6 +1600,28 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 full_content = cleaned_title
                 if cleaned_description:
                     full_content += f"\n\n{cleaned_description}"
+                created_date = item.get("createdDate", "")
+                ado_coverage.record_candidate(created_date)
+                if is_before_cutoff(
+                    created_date,
+                    search_profile.created_after,
+                ):
+                    ado_coverage.record_rejection()
+                    continue
+                topic_match = match_topic(
+                    full_content,
+                    search_profile,
+                    hints=" ".join(
+                        [
+                            safe_get(item, "type", ""),
+                            safe_get(item, "state", ""),
+                        ]
+                    ),
+                )
+                if not topic_match.relevant:
+                    ado_coverage.record_rejection()
+                    continue
+                ado_coverage.record_match()
 
                 # Enhanced categorization
                 enhanced_cat = utils.enhanced_categorize_feedback(
@@ -1392,16 +1634,23 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 )
 
                 ado_feedback.append(
-                    {
+                    prepare_feedback_item(
+                        {
+                        "External_ID": f"work-item:{work_item_id}",
                         "Title": f"[ADO-{work_item_id}] {cleaned_title}",
                         "Feedback_Gist": utils.generate_feedback_gist(full_content),
                         "Feedback": full_content,
                         "Content": full_content,
                         "Author": item.get("createdBy", ""),
-                        "Created": item.get("createdDate", ""),
+                        "Created": created_date,
+                        "Created_Date": created_date,
                         "Url": ado_url,
                         "URL": ado_url,
+                        "Source_URL": ado_url,
+                        "Source": "Azure DevOps",
                         "Sources": "Azure DevOps",
+                        "Matched_Keywords": topic_match.matched_terms,
+                        "Relevance_Score": topic_match.score,
                         "Category": enhanced_cat["legacy_category"],
                         "Enhanced_Category": enhanced_cat["primary_category"],
                         "Subcategory": enhanced_cat["subcategory"],
@@ -1418,7 +1667,8 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                         "ADO_Type": safe_get(item, "type", ""),
                         "ADO_State": safe_get(item, "state", ""),
                         "ADO_AssignedTo": safe_get(item, "assignedTo", ""),
-                    }
+                        }
+                    )
                 )
 
             logger.info(
@@ -1437,7 +1687,11 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 message=f"{len(ado_feedback)} items collected",
             )
             all_feedback.extend(ado_feedback)
-            results["ado"] = {"count": len(ado_feedback), "completed": True}
+            results["ado"] = {
+                "count": len(ado_feedback),
+                "completed": True,
+                "coverage": ado_coverage.snapshot(),
+            }
 
         # Collect from Stack Overflow if enabled
         if source_configs.get("stackoverflow", {}).get("enabled", False):
@@ -1452,12 +1706,10 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
 
             so_collector = StackOverflowCollector(site="stackoverflow")
             so_collector.configure(
-                {
-                    "max_items": so_config.get(
-                        "maxItems", config.MAX_ITEMS_PER_RUN
-                    ),
-                    "tags": so_config.get("tags", so_collector.tags),
-                }
+                collector_options(
+                    so_config,
+                    tags=so_config.get("tags", so_collector.tags),
+                )
             )
 
             stackoverflow_feedback = _run_collector(
@@ -1481,7 +1733,11 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 message=f"{len(stackoverflow_feedback)} items collected",
             )
             all_feedback.extend(stackoverflow_feedback)
-            results["stackoverflow"] = {"count": len(stackoverflow_feedback), "completed": True}
+            results["stackoverflow"] = {
+                "count": len(stackoverflow_feedback),
+                "completed": True,
+                "coverage": collector_coverage(so_collector),
+            }
 
         # Collect from DBA Stack Exchange if enabled
         if source_configs.get("dbaStackExchange", {}).get("enabled", False):
@@ -1496,12 +1752,10 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
 
             dba_collector = StackOverflowCollector(site="dba")
             dba_collector.configure(
-                {
-                    "max_items": dba_config.get(
-                        "maxItems", config.MAX_ITEMS_PER_RUN
-                    ),
-                    "tags": dba_config.get("tags", dba_collector.tags),
-                }
+                collector_options(
+                    dba_config,
+                    tags=dba_config.get("tags", dba_collector.tags),
+                )
             )
 
             dba_stackexchange_feedback = _run_collector(
@@ -1525,7 +1779,11 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 message=f"{len(dba_stackexchange_feedback)} items collected",
             )
             all_feedback.extend(dba_stackexchange_feedback)
-            results["dbaStackExchange"] = {"count": len(dba_stackexchange_feedback), "completed": True}
+            results["dbaStackExchange"] = {
+                "count": len(dba_stackexchange_feedback),
+                "completed": True,
+                "coverage": collector_coverage(dba_collector),
+            }
 
         # Collect from Hacker News if enabled
         if source_configs.get("hackerNews", {}).get("enabled", False):
@@ -1538,13 +1796,18 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
             hn_config = source_configs["hackerNews"]
             hn_collector = HackerNewsCollector()
             hn_collector.configure(
-                {
-                    "max_items": hn_config.get(
-                        "maxItems", config.MAX_ITEMS_PER_RUN
+                collector_options(
+                    hn_config,
+                    queries=(
+                        search_profile.terms
+                        if search_profile.topic
+                        else hn_config.get(
+                            "queries",
+                            hn_collector.queries,
+                        )
                     ),
-                    "queries": hn_config.get("queries", hn_collector.queries),
-                    "days": hn_config.get("days", hn_collector.days),
-                }
+                    days=hn_config.get("days", hn_collector.days),
+                )
             )
 
             hacker_news_feedback = _run_collector(
@@ -1570,6 +1833,7 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
             results["hackerNews"] = {
                 "count": len(hacker_news_feedback),
                 "completed": True,
+                "coverage": collector_coverage(hn_collector),
             }
 
         # Collect from DEV Community if enabled
@@ -1583,12 +1847,10 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
             dev_config = source_configs["devCommunity"]
             dev_collector = DevCommunityCollector()
             dev_collector.configure(
-                {
-                    "max_items": dev_config.get(
-                        "maxItems", config.MAX_ITEMS_PER_RUN
-                    ),
-                    "tags": dev_config.get("tags", dev_collector.tags),
-                }
+                collector_options(
+                    dev_config,
+                    tags=dev_config.get("tags", dev_collector.tags),
+                )
             )
 
             dev_community_feedback = _run_collector(
@@ -1614,6 +1876,7 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
             results["devCommunity"] = {
                 "count": len(dev_community_feedback),
                 "completed": True,
+                "coverage": collector_coverage(dev_collector),
             }
 
         # Collect from Microsoft Q&A if enabled
@@ -1628,13 +1891,7 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
             logger.info("❓ MICROSOFT Q&A: Collecting feedback")
 
             msqa_collector = MicrosoftQandACollector()
-            msqa_collector.configure(
-                {
-                    "max_items": msqa_config.get(
-                        "maxItems", config.MAX_ITEMS_PER_RUN
-                    )
-                }
-            )
+            msqa_collector.configure(collector_options(msqa_config))
 
             msqa_feedback = _run_collector(
                 msqa_collector,
@@ -1657,38 +1914,44 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 message=f"{len(msqa_feedback)} items collected",
             )
             all_feedback.extend(msqa_feedback)
-            results["microsoftQA"] = {"count": len(msqa_feedback), "completed": True}
+            results["microsoftQA"] = {
+                "count": len(msqa_feedback),
+                "completed": True,
+                "coverage": collector_coverage(msqa_collector),
+            }
 
-        # Collect from Tech Community if enabled
+        # Collect from official Microsoft SQL blogs if enabled
         if source_configs.get("techCommunity", {}).get("enabled", False):
             _raise_if_collection_cancelled(cancel_event)
             _update_collection_status(
-                current_source="Tech Community",
-                message="Collecting from Microsoft Tech Community...",
+                current_source="Microsoft SQL Blogs",
+                message="Collecting from Microsoft SQL blogs...",
             )
             _set_source_state("techCommunity", "running", message="Collecting...")
             tc_config = source_configs["techCommunity"]
-            logger.info("💬 TECH COMMUNITY: Collecting feedback")
+            logger.info("📰 MICROSOFT SQL BLOGS: Collecting feedback")
 
             tc_collector = TechCommunityCollector()
             tc_collector.configure(
-                {
-                    "max_items": tc_config.get(
-                        "maxItems", config.MAX_ITEMS_PER_RUN
-                    )
-                }
+                collector_options(
+                    tc_config,
+                    feed_urls=tc_config.get(
+                        "feeds",
+                        tc_collector.feed_urls,
+                    ),
+                )
             )
 
             techcommunity_feedback = _run_collector(
                 tc_collector,
                 source_key="techCommunity",
-                source_label="Tech Community",
+                source_label="Microsoft SQL Blogs",
                 total_sources=total_sources,
             )
             _raise_if_collection_cancelled(cancel_event)
-            logger.info(f"Tech Community collector found {len(techcommunity_feedback)} items.")
+            logger.info(f"Microsoft SQL Blogs collector found {len(techcommunity_feedback)} items.")
             _mark_collection_source_completed(
-                "Tech Community",
+                "Microsoft SQL Blogs",
                 "techCommunity",
                 len(techcommunity_feedback),
                 total_sources,
@@ -1700,7 +1963,11 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
                 message=f"{len(techcommunity_feedback)} items collected",
             )
             all_feedback.extend(techcommunity_feedback)
-            results["techCommunity"] = {"count": len(techcommunity_feedback), "completed": True}
+            results["techCommunity"] = {
+                "count": len(techcommunity_feedback),
+                "completed": True,
+                "coverage": collector_coverage(tc_collector),
+            }
 
         with _state_lock:
             source_errors = dict(collection_status.get("source_errors", {}))
@@ -1748,7 +2015,7 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
         hacker_news_feedback = add_sentiment_to_feedback(hacker_news_feedback, "Hacker News")
         dev_community_feedback = add_sentiment_to_feedback(dev_community_feedback, "DEV Community")
         msqa_feedback = add_sentiment_to_feedback(msqa_feedback, "Microsoft Q&A")
-        techcommunity_feedback = add_sentiment_to_feedback(techcommunity_feedback, "Tech Community")
+        techcommunity_feedback = add_sentiment_to_feedback(techcommunity_feedback, "Microsoft SQL Blogs")
 
         # Note: all_feedback was already built by extending with each source
         # No need to combine again as it would lose the items
@@ -1775,6 +2042,7 @@ def _collect_feedback_body(request_config, online_mode, operation_id, cancel_eve
 
         for feedback_item in all_feedback:
             _raise_if_collection_cancelled(cancel_event)
+            prepare_feedback_item(feedback_item)
             if "Feedback_ID" not in feedback_item or not feedback_item.get("Feedback_ID"):
                 feedback_item["Feedback_ID"] = FeedbackIDGenerator.generate_id_from_feedback_dict(feedback_item)
                 logger.info(f"Generated deterministic ID for item: {feedback_item['Feedback_ID']}")
@@ -2054,7 +2322,7 @@ def feedback_viewer():
     sentiment_filter = request.args.get("sentiment", "All")
     state_filter = request.args.get("state", "All")
     sort_by = request.args.get("sort", "newest")
-    show_repeating = request.args.get("show_repeating", "false").lower() == "true"
+    show_repeating = request.args.get("show_repeating", "true").lower() == "true"
     show_only_stored = request.args.get("show_only_stored", "false").lower() == "true"
     stored_token = get_server_fabric_token()
     has_bearer_token = bool(stored_token)
@@ -2300,11 +2568,21 @@ def feedback_viewer():
         logger.warning("No feedback data is available for filters")
 
     total_items = len(feedback_to_display)
+    sentiment_counts = {
+        label: sum(
+            1
+            for item in feedback_to_display
+            if item.get("Sentiment") == label
+        )
+        for label in ("Positive", "Negative", "Neutral")
+    }
+    initial_feedback_items = feedback_to_display[:50]
 
     return render_template(
         "feedback_viewer.html",
-        feedback_items=feedback_to_display,
+        feedback_items=initial_feedback_items,
         total_items=total_items,
+        sentiment_counts=sentiment_counts,
         sort_by=sort_by,
         show_repeating=show_repeating,
         show_only_stored=show_only_stored,
@@ -2793,7 +3071,7 @@ def get_filtered_feedback():
             ), 400
 
         # Other options
-        show_repeating = request.args.get("show_repeating", "false").lower() == "true"
+        show_repeating = request.args.get("show_repeating", "true").lower() == "true"
         show_only_stored = request.args.get("show_only_stored", "false").lower() == "true"
         # Check session for Fabric connection
         stored_token = get_server_fabric_token()
@@ -2845,7 +3123,7 @@ def get_filtered_feedback():
 
         # Analyze repeating requests if requested
         repeating_analysis = None
-        if show_repeating and feedback_to_display:
+        if show_repeating and feedback_to_display and page == 1:
             from utils import analyze_repeating_requests
 
             repeating_analysis = analyze_repeating_requests(feedback_to_display)

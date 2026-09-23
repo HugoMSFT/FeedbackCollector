@@ -7,6 +7,8 @@ import hashlib
 import re
 from datetime import datetime
 
+from search_plan import canonicalize_url
+
 
 class FeedbackIDGenerator:
     """Generates consistent IDs based on feedback content"""
@@ -29,7 +31,15 @@ class FeedbackIDGenerator:
         return content
 
     @staticmethod
-    def generate_feedback_id(title, content, source, author=None, created_date=None):
+    def generate_feedback_id(
+        title,
+        content,
+        source,
+        author=None,
+        created_date=None,
+        external_id=None,
+        source_url=None,
+    ):
         """Generate deterministic feedback ID based on STABLE content only
 
         IMPORTANT: This function should only use stable, immutable content that won't change
@@ -49,10 +59,23 @@ class FeedbackIDGenerator:
             Deterministic UUID-like string for the feedback
         """
 
-        # Normalize all inputs
+        norm_source = (source or "").casefold().strip()
+        stable_external_id = str(external_id or "").strip()
+        stable_url = canonicalize_url(source_url)
+        stable_identity = stable_external_id or stable_url
+        if stable_identity:
+            combined = f"{norm_source}|{stable_identity}"
+            hash_hex = hashlib.sha256(
+                combined.encode("utf-8")
+            ).hexdigest()
+            return (
+                f"{hash_hex[:8]}-{hash_hex[8:12]}-{hash_hex[12:16]}-"
+                f"{hash_hex[16:20]}-{hash_hex[20:32]}"
+            )
+
+        # Fall back to stable-looking content for imported or legacy rows.
         norm_title = FeedbackIDGenerator.normalize_content(title or "")
         norm_content = FeedbackIDGenerator.normalize_content(content or "")
-        norm_source = (source or "").lower()
         norm_author = (author or "").lower()
 
         # Create content hash components
@@ -107,7 +130,20 @@ class FeedbackIDGenerator:
         source = feedback.get("Source") or feedback.get("Sources") or ""
         author = feedback.get("Author") or feedback.get("Customer") or ""
         created_date = feedback.get("Created_Date") or feedback.get("Created") or ""
+        external_id = feedback.get("External_ID") or ""
+        source_url = (
+            feedback.get("Source_URL")
+            or feedback.get("Url")
+            or feedback.get("URL")
+            or ""
+        )
 
         return FeedbackIDGenerator.generate_feedback_id(
-            title=title, content=content, source=source, author=author, created_date=created_date
+            title=title,
+            content=content,
+            source=source,
+            author=author,
+            created_date=created_date,
+            external_id=external_id,
+            source_url=source_url,
         )

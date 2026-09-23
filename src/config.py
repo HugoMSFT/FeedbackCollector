@@ -885,8 +885,10 @@ DOMAIN_CATEGORIES = {
 # Table Schema
 TABLE_COLUMNS = [
     "Feedback_ID",  # NEW: Unique identifier for each feedback item
+    "External_ID",  # Stable source-native identity used across content edits.
     "Sources",  # Moved up so users opening the CSV see the source immediately.
     "Url",  # Moved up alongside Sources for the same reason.
+    "Source_URL",
     "Feedback_Gist",
     "Feedback",
     "Area",
@@ -1145,6 +1147,10 @@ IMPACT_TYPES_CONFIG = load_impact_types()
 
 # Source URLs
 MS_FABRIC_COMMUNITY_URL = "https://community.fabric.microsoft.com/t5/Fabric-platform-forums/ct-p/AC-Community"
+MICROSOFT_SQL_FEEDS = [
+    "https://cloudblogs.microsoft.com/sqlserver/feed/",
+    "https://devblogs.microsoft.com/azure-sql/feed/",
+]
 REDDIT_SUBREDDIT = os.getenv("REDDIT_SUBREDDIT", "SQLServer")
 REDDIT_SUBREDDITS = _env_list(
     "REDDIT_SUBREDDITS",

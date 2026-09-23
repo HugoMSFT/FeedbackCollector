@@ -89,6 +89,81 @@
 
                 <div id="results" class="mb-4"></div>
 
+                <section class="fluent-card" id="quickCollectionSetup">
+                    <div class="fluent-card-header">
+                        <div>
+                            <h2 class="fluent-section-title">
+                                <i class="bi bi-bullseye"></i>
+                                What feedback do you want to find?
+                            </h2>
+                            <p class="text-muted mb-0">
+                                Describe the topic normally. The app prepares source-specific
+                                searches, scans beyond the result target, and follows replies automatically.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="fluent-card-body">
+                        <div class="config-field">
+                            <label class="fluent-label" for="quickTopic">Topic or research goal</label>
+                            <textarea
+                                id="quickTopic"
+                                class="fluent-input"
+                                rows="3"
+                                maxlength="1000"
+                                placeholder="Example: Problems, feature requests, and setup friction with Query Store on Azure SQL"
+                            ></textarea>
+                        </div>
+                        <div class="config-field-row">
+                            <div class="config-field">
+                                <label class="fluent-label" for="quickTimeRange">Look back</label>
+                                <select id="quickTimeRange" class="fluent-select">
+                                    <option value="1">1 month</option>
+                                    <option value="3">3 months</option>
+                                    <option value="6">6 months</option>
+                                    <option value="12">1 year</option>
+                                    <option value="24">2 years</option>
+                                    <option value="0">All available history</option>
+                                </select>
+                            </div>
+                            <div class="config-field">
+                                <label class="fluent-label" for="quickResultLimit">Relevant results per source</label>
+                                <select id="quickResultLimit" class="fluent-select">
+                                    <option value="25">25</option>
+                                    <option value="50">50</option>
+                                    <option value="100">100</option>
+                                    <option value="250">250</option>
+                                    <option value="500">500</option>
+                                    <option value="1000">1,000</option>
+                                </select>
+                            </div>
+                        </div>
+                        <label class="fluent-label mt-2 me-4">
+                            <input type="checkbox" id="quickAllPublicSources" class="fluent-checkbox" checked>
+                            Use all public sources
+                        </label>
+                        <label class="fluent-label mt-2">
+                            <input type="checkbox" id="quickIncludeReplies" class="fluent-checkbox" checked>
+                            Include relevant comments, answers, and replies
+                        </label>
+                        <div class="config-field-row mt-3">
+                            <button class="fluent-button fluent-button-primary fluent-button-large" id="quickCollectFeedbackBtn">
+                                <i class="bi bi-search"></i>
+                                Collect feedback
+                            </button>
+                            <button class="fluent-button fluent-button-secondary" id="previewSearchPlanBtn">
+                                <i class="bi bi-list-check"></i>
+                                Preview source searches
+                            </button>
+                            <button class="fluent-button fluent-button-secondary" type="button"
+                                    id="openAdvancedSettingsBtn">
+                                <i class="bi bi-sliders"></i>
+                                Advanced source settings
+                            </button>
+                        </div>
+                        <div id="searchPlanPreview"></div>
+                    </div>
+                </section>
+
                 <div class="dashboard-grid">
                     <div class="stat-card">
                         <i class="bi bi-chat-square-text stat-icon"></i>
@@ -119,7 +194,10 @@
                         <div id="dataSourcesSummary">
                             <!-- Simplified view of sources will go here -->
                             <div class="alert alert-info">
-                                <i class="bi bi-info-circle"></i> Go to <strong>Sources & Settings</strong> to configure your data connectors.
+                                <i class="bi bi-info-circle"></i>
+                                Public sources are selected automatically. Open
+                                <strong>Advanced source settings</strong> only to add repositories,
+                                communities, credentials, or custom limits.
                             </div>
                         </div>
                     </div>
@@ -250,15 +328,20 @@
                     </div>
                 </div>
 
-                <!-- Keywords Management -->
-                <section class="fluent-card">
-                    <div class="fluent-card-header">
+                <!-- Advanced Keywords Management -->
+                <details class="fluent-card">
+                    <summary class="fluent-card-header" style="cursor: pointer;">
                         <h2 class="fluent-section-title">
                             <i class="bi bi-tags"></i>
-                            Keywords Management
+                            Advanced search term overrides
                         </h2>
-                    </div>
+                        <span class="text-muted">Optional</span>
+                    </summary>
                     <div class="fluent-card-body">
+                        <p class="text-muted">
+                            The topic description normally creates these terms automatically.
+                            Edit this global fallback list only for specialized aliases or acronyms.
+                        </p>
                         <div class="config-field">
                             <label class="fluent-label">Add New Keyword:</label>
                             <div class="config-field-row">
@@ -289,7 +372,7 @@
                         
                         <div id="keywordsStatus" class="status-message"></div>
                     </div>
-                </section>
+                </details>
 
                 <!-- Category Management -->
                 <section class="fluent-card">
@@ -1586,19 +1669,18 @@
                 <div style="padding:20px;">
                     <h6>How to Use</h6>
                     <ol>
-                        <li><strong>Configure Data Sources:</strong> Enable/disable sources and customize their settings</li>
-                        <li><strong>Adjust Collection Settings:</strong> Set time ranges, limits, and filters</li>
-                        <li><strong>Manage Keywords:</strong> Add or remove keywords to filter relevant feedback</li>
-                        <li><strong>Collect Feedback:</strong> Click the main button to start collection</li>
-                        <li><strong>View Results:</strong> Use the navigation to view collected feedback and insights</li>
+                        <li><strong>Describe your goal:</strong> Enter the topic or research question on the Dashboard in normal language.</li>
+                        <li><strong>Choose coverage:</strong> Select the lookback and relevant-result target. Replies are included by default.</li>
+                        <li><strong>Collect:</strong> The app prepares source-specific searches, scans extra candidates, follows pagination, and groups the results.</li>
+                        <li><strong>Review:</strong> Open View Feedback or Insights to filter, classify, and analyze the collected feedback.</li>
+                        <li><strong>Optional tuning:</strong> Use Sources &amp; Settings or Taxonomy only for credentials, repositories, communities, exclusions, or specialized aliases.</li>
                     </ol>
 
                     <h6>Data Sources</h6>
                     <ul>
-                        <li><strong>Reddit:</strong> Collects from specified subreddits</li>
-                        <li><strong>GitHub:</strong> Collects from repository discussions and issues</li>
-                        <li><strong>Fabric Community:</strong> Collects from Microsoft Fabric forums</li>
-                        <li><strong>Azure DevOps:</strong> Collects from work items</li>
+                        <li><strong>Automatic public sources:</strong> Stack Exchange, Microsoft Q&amp;A, Tech Community, Hacker News, DEV Community, and GitHub Issues.</li>
+                        <li><strong>Credential-backed sources:</strong> Reddit, GitHub Discussions, and Azure DevOps can be enabled in Advanced source settings.</li>
+                        <li><strong>Conversation coverage:</strong> Relevant comments, answers, and replies are collected where the source API supports them.</li>
                     </ul>
 
                     <h6>Storage Options</h6>

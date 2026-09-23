@@ -13,6 +13,14 @@ import collectors
 class FakeResponse:
     def __init__(self, payload):
         self.payload = payload
+        self.headers = {}
+        self.content = (
+            payload
+            if isinstance(payload, bytes)
+            else str(payload).encode("utf-8")
+            if isinstance(payload, str)
+            else b""
+        )
 
     def raise_for_status(self):
         return None
@@ -102,6 +110,7 @@ class PublicCollectorTests(unittest.TestCase):
                         "MicrosoftFabric",
                     ],
                     "max_items": 5,
+                    "max_candidates": 5,
                     "sort": "top",
                     "time_filter": "year",
                 }
@@ -116,7 +125,7 @@ class PublicCollectorTests(unittest.TestCase):
         )
         self.assertEqual(
             [call[2]["limit"] for call in reddit.calls],
-            [2, 2, 1],
+            [2, 2, 2],
         )
         self.assertTrue(
             all(call[2]["sort"] == "top" for call in reddit.calls)
@@ -166,7 +175,14 @@ class PublicCollectorTests(unittest.TestCase):
             ["SQL Server", "Azure SQL Database", "Azure SQL Managed Instance"],
         ):
             collector = collectors.StackOverflowCollector()
-            collector.configure({"max_items": 3})
+            collector.configure(
+                {
+                    "max_items": 3,
+                    "max_candidates": 3,
+                    "search_terms": ["SQL"],
+                    "include_replies": False,
+                }
+            )
             items = collector.collect()
             collector.close()
 
@@ -179,7 +195,12 @@ class PublicCollectorTests(unittest.TestCase):
                 "azure-sql-managed-instance",
             ],
         )
-        self.assertTrue(all("q" not in call[1]["params"] for call in session.calls))
+        self.assertTrue(
+            all(
+                call[1]["params"]["q"] == "SQL"
+                for call in session.calls
+            )
+        )
         self.assertEqual(items[1]["Area"], "SQL Server and Azure SQL")
         self.assertTrue(session.closed)
 
@@ -242,6 +263,34 @@ class PublicCollectorTests(unittest.TestCase):
                 collector.collect()
             collector.close()
 
+    def test_hacker_news_excludes_comments_when_replies_disabled(self):
+        hit = {
+            "objectID": "42",
+            "story_title": "SQL Server discussion",
+            "comment_text": "Query Store comment",
+            "author": "reader",
+            "created_at": "2026-01-01T00:00:00Z",
+            "_tags": ["comment", "story_1"],
+        }
+        session = FakeSession([{"hits": [hit]}])
+        with mock.patch.object(
+            collectors,
+            "create_retry_session",
+            return_value=session,
+        ):
+            collector = collectors.HackerNewsCollector()
+            collector.configure(
+                {
+                    "max_items": 1,
+                    "search_terms": ["SQL Server"],
+                    "include_replies": False,
+                }
+            )
+            items = collector.collect()
+            collector.close()
+
+        self.assertEqual(items, [])
+
     def test_dev_community_uses_product_tags_and_deduplicates_articles(self):
         article = {
             "id": 7,
@@ -254,7 +303,14 @@ class PublicCollectorTests(unittest.TestCase):
             "comments_count": 2,
             "public_reactions_count": 5,
         }
-        session = FakeSession([[article], [article], [article]])
+        detail = {
+            **article,
+            "body_markdown": "A practical SQL Server troubleshooting guide",
+        }
+        article["comments_count"] = 0
+        session = FakeSession(
+            [[article], detail, [article], [article]]
+        )
 
         with mock.patch.object(
             collectors,
@@ -266,7 +322,13 @@ class PublicCollectorTests(unittest.TestCase):
             ["SQL Server", "Azure SQL Database"],
         ):
             collector = collectors.DevCommunityCollector()
-            collector.configure({"max_items": 3})
+            collector.configure(
+                {
+                    "max_items": 3,
+                    "search_terms": ["SQL Server"],
+                    "include_replies": False,
+                }
+            )
             items = collector.collect()
             collector.close()
 
@@ -274,7 +336,11 @@ class PublicCollectorTests(unittest.TestCase):
         self.assertEqual(items[0]["Sources"], "DEV Community")
         self.assertIn("SQL Server", items[0]["Matched_Keywords"])
         self.assertEqual(
-            [call[1]["params"]["tag"] for call in session.calls],
+            [
+                call[1]["params"]["tag"]
+                for call in session.calls
+                if call[0] == collector.api_url
+            ],
             ["sqlserver", "azuresql", "mssql"],
         )
 
@@ -294,6 +360,156 @@ class PublicCollectorTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "not a list"):
                 collector.collect()
             collector.close()
+
+    def test_microsoft_sql_blog_feed_preserves_source_url_and_identity(self):
+        feed = b"""<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+          <channel>
+            <item>
+              <title>SQL Server Query Store performance improvements</title>
+              <link>https://example.test/sql-post/?utm_source=rss</link>
+              <guid>post-42</guid>
+              <pubDate>Mon, 21 Sep 2026 12:00:00 +0000</pubDate>
+              <description><![CDATA[Short excerpt.]]></description>
+              <content:encoded><![CDATA[Full Query Store performance analysis.]]></content:encoded>
+              <category>SQL Server</category>
+            </item>
+          </channel>
+        </rss>"""
+        session = FakeSession([feed])
+
+        with mock.patch.object(
+            collectors,
+            "create_retry_session",
+            return_value=session,
+        ):
+            collector = collectors.TechCommunityCollector()
+            collector.configure(
+                {
+                    "max_items": 1,
+                    "search_terms": ["Query Store"],
+                    "feed_urls": ["https://example.test/feed/"],
+                    "include_replies": False,
+                }
+            )
+            items = collector.collect()
+            collector.close()
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["External_ID"], "feed-entry:post-42")
+        self.assertEqual(items[0]["Url"], "https://example.test/sql-post")
+        self.assertEqual(items[0]["Source_URL"], items[0]["Url"])
+        self.assertEqual(items[0]["Created"], "2026-09-21T12:00:00+00:00")
+        self.assertIn("Full Query Store performance analysis", items[0]["Feedback"])
+        self.assertNotIn("Short excerpt", items[0]["Feedback"])
+
+    def test_github_issues_uses_topic_search_and_stable_identity(self):
+        issue = {
+            "id": 42,
+            "node_id": "I_kwD-topic",
+            "number": 7,
+            "title": "Query Store performance regression",
+            "body": "Azure SQL Query Store became slow.",
+            "html_url": "https://github.com/example/repo/issues/7",
+            "state": "open",
+            "created_at": "2026-09-01T00:00:00Z",
+            "user": {"login": "customer"},
+            "labels": [{"name": "performance"}],
+            "comments": 0,
+        }
+        session = FakeSession(
+            [
+                {"has_issues": True},
+                {"total_count": 1, "items": [issue]},
+            ]
+        )
+
+        with mock.patch.object(
+            collectors,
+            "create_retry_session",
+            return_value=session,
+        ):
+            collector = collectors.GitHubIssuesCollector()
+            collector.configure(
+                {
+                    "owner": "example",
+                    "repo": "repo",
+                    "max_items": 1,
+                    "search_terms": ["Query Store", "Azure SQL"],
+                    "include_replies": False,
+                }
+            )
+            items = collector.collect()
+            collector.close()
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["External_ID"], "issue:I_kwD-topic")
+        self.assertEqual(
+            items[0]["Source_URL"],
+            "https://github.com/example/repo/issues/7",
+        )
+        search_call = session.calls[1]
+        self.assertEqual(search_call[0], "https://api.github.com/search/issues")
+        self.assertIn("repo:example/repo", search_call[1]["params"]["q"])
+        self.assertLessEqual(len(search_call[1]["params"]["q"]), 256)
+        self.assertLessEqual(
+            search_call[1]["params"]["q"].count(" OR "),
+            5,
+        )
+
+    def test_github_issue_comment_only_match_is_collected(self):
+        issue = {
+            "id": 42,
+            "number": 7,
+            "title": "General support question",
+            "body": "No topic in the issue body.",
+            "html_url": "https://github.com/example/repo/issues/7",
+            "state": "open",
+            "created_at": "2026-09-01T00:00:00Z",
+            "user": {"login": "customer"},
+            "labels": [],
+            "comments_url": "https://api.github.com/issues/7/comments",
+        }
+        comment = {
+            "id": 99,
+            "node_id": "IC_topic",
+            "body": "Query Store performance is much slower now.",
+            "html_url": (
+                "https://github.com/example/repo/issues/7"
+                "#issuecomment-99"
+            ),
+            "created_at": "2026-09-02T00:00:00Z",
+            "user": {"login": "commenter"},
+        }
+        session = FakeSession(
+            [
+                {"has_issues": True},
+                {"total_count": 1, "items": [issue]},
+                [comment],
+            ]
+        )
+
+        with mock.patch.object(
+            collectors,
+            "create_retry_session",
+            return_value=session,
+        ):
+            collector = collectors.GitHubIssuesCollector()
+            collector.configure(
+                {
+                    "owner": "example",
+                    "repo": "repo",
+                    "max_items": 1,
+                    "search_terms": ["Query Store"],
+                    "include_replies": True,
+                }
+            )
+            items = collector.collect()
+            collector.close()
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["External_ID"], "issue-comment:IC_topic")
+        self.assertEqual(items[0]["Sources"], "GitHub Issue Comment")
 
 
 if __name__ == "__main__":

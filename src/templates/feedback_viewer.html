@@ -818,9 +818,9 @@
                     </div>
                 </div>
                 <div class="d-flex gap-2 flex-wrap">
-                    {% set positive_count = feedback_items | selectattr('Sentiment', 'equalto', 'Positive') | list | length %}
-                    {% set negative_count = feedback_items | selectattr('Sentiment', 'equalto', 'Negative') | list | length %}
-                    {% set neutral_count = feedback_items | selectattr('Sentiment', 'equalto', 'Neutral') | list | length %}
+                    {% set positive_count = sentiment_counts.get('Positive', 0) %}
+                    {% set negative_count = sentiment_counts.get('Negative', 0) %}
+                    {% set neutral_count = sentiment_counts.get('Neutral', 0) %}
                     <span class="fluent-badge fluent-badge-success">😊 {{ positive_count }} Positive</span>
                     <span class="fluent-badge fluent-badge-secondary">😐 {{ neutral_count }} Neutral</span>
                     <span class="fluent-badge fluent-badge-error">😞 {{ negative_count }} Negative</span>
@@ -1442,14 +1442,17 @@
         
         // Initialize Modern Filter System when page loads
         document.addEventListener('DOMContentLoaded', function() {
-            // Initialize the modern filter system
-            modernFilterSystem = new ModernFilterSystem({
-                apiEndpoint: '/api/feedback/filtered',
-                containerId: 'feedback-container',
-                loadingId: 'filter-loading',
-                errorId: 'filter-error',
-                errorMessageId: 'filter-error-message'
-            });
+            modernFilterSystem = window.modernFilterSystem;
+            if (!modernFilterSystem) {
+                modernFilterSystem = new ModernFilterSystem({
+                    apiEndpoint: '/api/feedback/filtered',
+                    containerId: 'feedback-container',
+                    loadingId: 'filter-loading',
+                    errorId: 'filter-error',
+                    errorMessageId: 'filter-error-message'
+                });
+                window.modernFilterSystem = modernFilterSystem;
+            }
             
             console.log('🔧 Modern Filter System initialized');
         });

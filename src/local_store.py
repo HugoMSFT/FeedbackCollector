@@ -43,6 +43,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
+from search_plan import canonicalize_url
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,12 +79,13 @@ STATE_COLUMNS = USER_EDIT_COLUMNS + USER_MODIFIABLE_CATEGORY_COLUMNS + (
 JSON_LIST_COLUMNS = ("Matched_Keywords", "Domains")
 
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 
 _CREATE_FEEDBACK_SQL = """
 CREATE TABLE IF NOT EXISTS feedback (
     Feedback_ID TEXT PRIMARY KEY,
+    External_ID TEXT,
     Feedback_Gist TEXT,
     Feedback TEXT,
     Title TEXT,
@@ -389,6 +392,39 @@ class LocalStore:
             )
             return
 
+        if version == 4:
+            self._add_column_if_missing(
+                conn,
+                "feedback",
+                "External_ID",
+                "TEXT",
+            )
+            for row in conn.execute(
+                """
+                SELECT Feedback_ID, Source_URL, Url
+                FROM feedback
+                WHERE External_ID IS NULL OR External_ID = ''
+                """
+            ).fetchall():
+                source_url = row["Source_URL"] or row["Url"] or ""
+                external_id = canonicalize_url(source_url) or source_url
+                if external_id:
+                    conn.execute(
+                        """
+                        UPDATE feedback
+                        SET External_ID = ?
+                        WHERE Feedback_ID = ?
+                        """,
+                        (external_id, row["Feedback_ID"]),
+                    )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_feedback_external_identity
+                ON feedback(Sources, External_ID)
+                """
+            )
+            return
+
         raise RuntimeError(f"No migration is defined for schema version {version}")
 
     def _add_column_if_missing(
@@ -557,6 +593,39 @@ class LocalStore:
                 row[0]
                 for row in conn.execute("SELECT Feedback_ID FROM feedback").fetchall()
             }
+            identity_rows = conn.execute(
+                """
+                SELECT Feedback_ID, Sources, Source, External_ID, Source_URL, Url
+                FROM feedback
+                """
+            ).fetchall()
+            existing_external_ids = {}
+            legacy_urls = {}
+            for identity_row in identity_rows:
+                source = (
+                    identity_row["Sources"]
+                    or identity_row["Source"]
+                    or ""
+                ).casefold()
+                external_id = identity_row["External_ID"] or ""
+                external_id = canonicalize_url(external_id) or external_id
+                source_url = (
+                    identity_row["Source_URL"]
+                    or identity_row["Url"]
+                    or ""
+                )
+                canonical_source_url = canonicalize_url(source_url)
+                if external_id:
+                    existing_external_ids[
+                        (source, external_id)
+                    ] = identity_row["Feedback_ID"]
+                if canonical_source_url and (
+                    not external_id
+                    or external_id == canonical_source_url
+                ):
+                    legacy_urls[(source, canonical_source_url)] = identity_row[
+                        "Feedback_ID"
+                    ]
             existing_extras: Dict[str, Dict[str, Any]] = {}
             for existing_row in conn.execute(
                 """
@@ -585,6 +654,26 @@ class LocalStore:
                     logger.warning("Skipping feedback item with an invalid ID")
                     skipped += 1
                     continue
+
+                source = str(
+                    item.get("Sources") or item.get("Source") or ""
+                ).casefold()
+                external_id = str(item.get("External_ID") or "")
+                external_id = canonicalize_url(external_id) or external_id
+                source_url = str(
+                    item.get("Source_URL") or item.get("Url") or ""
+                )
+                source_url = canonicalize_url(source_url) or source_url
+                previous_id = (
+                    existing_external_ids.get((source, external_id))
+                    if external_id
+                    else None
+                )
+                if previous_id is None and source_url:
+                    previous_id = legacy_urls.get((source, source_url))
+                if previous_id is not None and fid not in existing_ids:
+                    fid = previous_id
+                    item["Feedback_ID"] = previous_id
 
                 row, extras = self._split_known_columns(item, feedback_cols)
                 row["Feedback_ID"] = fid
@@ -627,6 +716,8 @@ class LocalStore:
                     )
                     conn.execute(sql, values)
                     existing_ids.add(fid)
+                    if external_id:
+                        existing_external_ids[(source, external_id)] = fid
                     inserted += 1
 
                 # Make sure a feedback_state row exists, but never reset it.

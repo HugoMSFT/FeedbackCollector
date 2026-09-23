@@ -7,8 +7,13 @@ optionally be synchronized with Microsoft Fabric SQL.
 ## Capabilities
 
 - Collect from Stack Overflow, DBA Stack Exchange, Microsoft Q&A, Microsoft
-  Tech Community, Hacker News, DEV Community, GitHub Issues and Discussions,
+  SQL blogs, Hacker News, DEV Community, GitHub Issues and Discussions,
   Reddit, Azure DevOps, and Microsoft Fabric Community.
+- Turn a plain-language research goal into bounded, source-specific searches;
+  advanced keywords remain available but are not required for normal use.
+- Continue paging past irrelevant candidates until the relevant-result target,
+  lookback boundary, source exhaustion, or API quota is reached.
+- Collect relevant comments, answers, and replies when a source exposes them.
 - Categorize feedback, detect sentiment, identify duplicates, and track state,
   audience, domain, notes, and impact.
 - Persist feedback and edits in SQLite. Source runs use
@@ -19,6 +24,21 @@ optionally be synchronized with Microsoft Fabric SQL.
 - Optionally embed a Power BI report on the insights page.
 
 Local review and editing do not require Fabric or any external credentials.
+
+## Simplified workflow
+
+1. On the Dashboard, describe the feedback you want in normal language, such
+   as `Query Store performance and setup friction on Azure SQL`.
+2. Choose a lookback and relevant-result target. Public sources are selected
+   automatically and replies are included by default.
+3. Select **Collect feedback**. The app expands the goal into source queries,
+   scans additional candidates, follows pagination, canonicalizes source URLs,
+   and reports candidates/pages scanned alongside the matches.
+
+Open **Sources & Settings** only to change repositories, communities,
+credentials, source-specific limits, or collection depth. The Taxonomy page's
+keyword list is an optional fallback for aliases and acronyms, not a required
+setup step.
 
 ## Requirements
 
@@ -83,7 +103,7 @@ Community remains available, but is disabled by default.
 | Stack Overflow | Enabled | None | `sql-server`, `azure-sql-database`, `azure-sql-managed-instance` |
 | DBA Stack Exchange | Enabled | None | SQL Server and Azure SQL administration |
 | Microsoft Q&A | Enabled | None | SQL Server questions |
-| Microsoft Tech Community | Enabled | None | SQL Server and Azure SQL discussions |
+| Microsoft SQL Blogs | Enabled | None | Official SQL Server and Azure SQL feeds and public comments |
 | Hacker News | Enabled | None | Recent SQL Server and Azure SQL stories and comments |
 | DEV Community | Enabled | None | `sqlserver`, `azuresql`, and `mssql` posts |
 | GitHub Issues | Enabled | Optional token | SQL tooling repositories including `vscode-mssql`, `DacFx`, `SqlClient`, and `go-sqlcmd` |
@@ -96,6 +116,13 @@ Public APIs enforce their own quotas. Keep per-source limits conservative,
 especially for the unauthenticated Stack Exchange and GitHub APIs. One failed or
 misconfigured source is reported in the progress drawer without discarding data
 successfully collected from other sources.
+
+The item limit is a relevant-result target, not a raw download cap. Each
+collector can scan a configurable multiple of that target, and stops when it
+reaches the target, exhausts the source, crosses the lookback boundary, or
+reaches its candidate budget. Coverage results include candidates scanned,
+queries, pages, and replies. Source-native IDs and canonical `http(s)` URLs keep
+the same record stable when a post is edited or tracking parameters change.
 
 In the Reddit source card, enter subreddit names separated by commas or new
 lines, for example `SQLServer, Database, MicrosoftFabric`. The UI accepts

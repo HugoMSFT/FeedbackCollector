@@ -106,6 +106,26 @@ class AppRouteTests(unittest.TestCase):
 
         self.assertEqual(app_module._load_feedback_snapshot(), [])
 
+    def test_feedback_page_renders_bounded_initial_batch(self):
+        app_module.local_store.upsert_feedback_items(
+            [
+                {
+                    "Feedback_ID": f"item-{index:02d}",
+                    "Feedback": f"Feedback body {index:02d}",
+                    "Title": f"Feedback title {index:02d}",
+                    "Created": f"2026-01-01T00:{index:02d}:00",
+                }
+                for index in range(60)
+            ]
+        )
+
+        response = self.client.get("/feedback?show_repeating=true")
+        body = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Feedback title 59", body)
+        self.assertNotIn("Feedback title 00", body)
+
     def test_state_only_fabric_sync_does_not_freeze_categorization(self):
         app_module.local_store.upsert_feedback_items(
             [
@@ -476,6 +496,35 @@ class AppRouteTests(unittest.TestCase):
         self.assertIsInstance(captured["cancel_event"], threading.Event)
         self.assertEqual(captured["operation_id"], response.json["operation_id"])
 
+    def test_search_plan_preview_expands_natural_language_topic(self):
+        response = self.client.post(
+            "/api/search-plan",
+            json={
+                "topic": "Feedback about Query Store performance on Azure SQL",
+                "timeRangeMonths": 12,
+                "candidateMultiplier": 10,
+                "includeReplies": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        terms = [term.casefold() for term in response.json["search_terms"]]
+        self.assertIn("query store", terms)
+        self.assertIn("Azure SQL", response.json["search_terms"])
+        self.assertTrue(response.json["include_replies"])
+        self.assertIsNotNone(response.json["created_after"])
+
+    def test_search_plan_preview_rejects_invalid_settings(self):
+        response = self.client.post(
+            "/api/search-plan",
+            json={
+                "topic": "SQL Server",
+                "timeRangeMonths": "forever",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+
     def test_collection_accepts_multiple_normalized_subreddits(self):
         captured = {}
 
@@ -583,9 +632,22 @@ class AppRouteTests(unittest.TestCase):
                 }
             },
         )
+        invalid_feed = self.client.post(
+            "/api/collect",
+            json={
+                "sources": {
+                    "techCommunity": {
+                        "enabled": True,
+                        "feeds": ["http://127.0.0.1/private"],
+                        "maxItems": 5,
+                    }
+                }
+            },
+        )
 
         self.assertEqual(invalid_days.status_code, 400)
         self.assertEqual(invalid_tags.status_code, 400)
+        self.assertEqual(invalid_feed.status_code, 400)
 
     def test_missing_ado_config_is_skipped_while_public_sources_complete(self):
         request_body = {

@@ -996,7 +996,7 @@ def _clean_similarity_text(text: str) -> str:
     if not text:
         return ""
     text = re.sub(r"[^\w\s]", " ", str(text).lower())
-    return re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"\s+", " ", text).strip()[:4000]
 
 
 def _calculate_feedback_similarity(clean1: str, clean2: str) -> float:
@@ -1005,10 +1005,20 @@ def _calculate_feedback_similarity(clean1: str, clean2: str) -> float:
 
     from difflib import SequenceMatcher
 
-    similarity = SequenceMatcher(None, clean1, clean2).ratio()
     words1 = set(clean1.split())
     words2 = set(clean2.split())
     common_words = words1.intersection(words2)
+    union_words = words1.union(words2)
+    jaccard = len(common_words) / max(len(union_words), 1)
+    if jaccard < 0.12:
+        return 0.0
+
+    similarity = SequenceMatcher(
+        None,
+        clean1[:1500],
+        clean2[:1500],
+        autojunk=True,
+    ).ratio()
     word_boost = len(common_words) / max(len(words1), len(words2), 1) * 0.2
     return min(similarity + word_boost, 1.0)
 
@@ -1041,8 +1051,33 @@ def _find_repeating_components(
 
     exact_representatives = {}
     token_index = defaultdict(list)
+    candidate_stop_words = {
+        "about",
+        "after",
+        "also",
+        "been",
+        "could",
+        "from",
+        "have",
+        "into",
+        "more",
+        "only",
+        "other",
+        "that",
+        "their",
+        "there",
+        "these",
+        "they",
+        "this",
+        "using",
+        "when",
+        "where",
+        "which",
+        "with",
+        "would",
+    }
     max_bucket_candidates = 50
-    max_candidates_per_item = 100
+    max_candidates_per_item = 30
 
     for index, clean_text in enumerate(cleaned):
         if not clean_text:
@@ -1054,7 +1089,11 @@ def _find_repeating_components(
             continue
         exact_representatives[clean_text] = index
 
-        tokens = list(dict.fromkeys(clean_text.split()))[:64]
+        tokens = [
+            token
+            for token in dict.fromkeys(clean_text.split())
+            if len(token) >= 4 and token not in candidate_stop_words
+        ][:48]
         candidate_counts = Counter()
         for token in tokens:
             for candidate in token_index[token][-max_bucket_candidates:]:

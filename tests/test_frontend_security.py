@@ -90,7 +90,7 @@ class FrontendSecurityRegressionTests(unittest.TestCase):
     def test_source_defaults_prioritize_sql_server_and_azure_sql(self):
         sources = self.read("src/static/js/source-configuration.js")
 
-        self.assertIn("this.configurationVersion = 3;", sources)
+        self.assertIn("this.configurationVersion = 4;", sources)
         self.assertIn(
             "subreddits: ['SQLServer', 'Database', 'MicrosoftFabric']",
             sources,
@@ -111,6 +111,89 @@ class FrontendSecurityRegressionTests(unittest.TestCase):
             re.compile(r"ado:\s*\{\s*enabled:\s*false"),
         )
         self.assertNotIn("parentWorkItem: '1319103'", sources)
+
+    def test_dashboard_exposes_simple_topic_flow(self):
+        index = self.read("src/templates/index.html")
+        sources = self.read("src/static/js/source-configuration.js")
+        manager = self.read("src/static/js/collection-manager.js")
+
+        self.assertIn('id="quickTopic"', index)
+        self.assertIn('id="quickCollectFeedbackBtn"', index)
+        self.assertIn('id="previewSearchPlanBtn"', index)
+        self.assertIn("syncQuickSetupFromDom()", sources)
+        self.assertIn("includeReplies: true", sources)
+        self.assertIn("maxItemsPerSource: 100", sources)
+        self.assertIn("quickCollectFeedbackBtn", manager)
+
+    def test_advanced_keyword_setup_is_collapsed(self):
+        index = self.read("src/templates/index.html")
+        self.assertIn("Advanced search term overrides", index)
+        self.assertIn("<details class=\"fluent-card\">", index)
+
+    def test_inline_button_handlers_are_defined(self):
+        templates = "\n".join(
+            [
+                self.read("src/templates/index.html"),
+                self.read("src/templates/feedback_viewer.html"),
+                self.read("src/templates/insights_page.html"),
+            ]
+        )
+        scripts = "\n".join(
+            [
+                templates,
+                self.read("src/static/js/source-configuration.js"),
+                self.read("src/static/js/collection-manager.js"),
+                self.read("src/static/js/modern-filter-system.js"),
+            ]
+        )
+        handlers = set(
+            re.findall(
+                r'onclick="\s*([A-Za-z_$][\w$]*)\s*\(',
+                templates,
+            )
+        )
+        handlers -= {"alert", "document", "if", "window"}
+        definitions = set(
+            re.findall(
+                r"\bfunction\s+([A-Za-z_$][\w$]*)\s*\(",
+                scripts,
+            )
+        )
+        self.assertEqual(handlers - definitions, set())
+
+    def test_dashboard_id_buttons_are_bound_by_scripts(self):
+        scripts = "\n".join(
+            [
+                self.read("src/static/js/source-configuration.js"),
+                self.read("src/static/js/collection-manager.js"),
+            ]
+        )
+        for button_id in (
+            "collectFeedbackBtn",
+            "quickCollectFeedbackBtn",
+            "previewSearchPlanBtn",
+            "openAdvancedSettingsBtn",
+            "connectFabricBtn",
+            "writeToFabricBtn",
+        ):
+            self.assertIn(button_id, scripts, button_id)
+
+    def test_feedback_infinite_scroll_targets_the_card_grid(self):
+        filters = self.read("src/static/js/modern-filter-system.js")
+        viewer = self.read("src/templates/feedback_viewer.html")
+        self.assertIn(
+            "container.querySelector('#feedback-grid')",
+            filters,
+        )
+        self.assertIn(
+            "sentinel.style.display = this.hasMore ? 'block' : 'none'",
+            filters,
+        )
+        self.assertIn("if (!window.modernFilterSystem)", filters)
+        self.assertIn(
+            "modernFilterSystem = window.modernFilterSystem;",
+            viewer,
+        )
 
 
 if __name__ == "__main__":

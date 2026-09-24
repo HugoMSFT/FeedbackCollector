@@ -1,7 +1,7 @@
 // Source Configuration Manager
 class SourceConfigManager {
     constructor() {
-        this.configurationVersion = 3;
+        this.configurationVersion = 4;
         this.sources = {
             reddit: {
                 enabled: false,
@@ -9,7 +9,7 @@ class SourceConfigManager {
                 sort: 'new',
                 timeFilter: 'month',
                 postTypes: ['all'],
-                maxItems: 5
+                maxItems: 100
             },
             github: {
                 enabled: false,
@@ -22,7 +22,7 @@ class SourceConfigManager {
                 ],
                 state: 'all',
                 labels: [],
-                maxItems: 5
+                maxItems: 100
             },
             githubIssues: {
                 enabled: true,
@@ -60,53 +60,61 @@ class SourceConfigManager {
                 ],
                 state: 'all',
                 labels: [],
-                maxItems: 5
+                maxItems: 100
             },
             stackoverflow: {
                 enabled: true,
                 tags: ['sql-server', 'azure-sql-database', 'azure-sql-managed-instance'],
-                maxItems: 5
+                maxItems: 100
             },
             dbaStackExchange: {
                 enabled: true,
                 tags: ['sql-server', 'azure-sql-database'],
-                maxItems: 5
+                maxItems: 100
             },
             microsoftQA: {
                 enabled: true,
-                maxItems: 5
+                maxItems: 100
             },
             techCommunity: {
                 enabled: true,
-                maxItems: 5
+                feeds: [
+                    'https://cloudblogs.microsoft.com/sqlserver/feed/',
+                    'https://devblogs.microsoft.com/azure-sql/feed/'
+                ],
+                maxItems: 100
             },
             hackerNews: {
                 enabled: true,
                 queries: ['SQL Server', 'Azure SQL Database', 'Azure SQL Managed Instance'],
                 days: 180,
-                maxItems: 5
+                maxItems: 100
             },
             devCommunity: {
                 enabled: true,
                 tags: ['sqlserver', 'azuresql', 'mssql'],
-                maxItems: 5
+                maxItems: 100
             },
             fabricCommunity: {
                 enabled: false,
-                maxItems: 5
+                maxItems: 100
             },
             ado: {
                 enabled: false,
                 parentWorkItem: '',
                 workItemTypes: ['Bug', 'Feature', 'User Story'],
                 states: ['New', 'Active', 'Resolved'],
-                maxItems: 5
+                maxItems: 100
             }
         };
         
         this.settings = {
-            timeRangeMonths: 6,
-            maxItemsPerSource: 5,
+            topic: 'SQL Server and Azure SQL',
+            timeRangeMonths: 12,
+            maxItemsPerSource: 100,
+            candidateMultiplier: 10,
+            includeReplies: true,
+            autoSelectPublicSources: true,
             respectRateLimits: true,
             keywords: [],
             duplicateDetection: true,
@@ -122,6 +130,7 @@ class SourceConfigManager {
         this.setupEventListeners();
         this.renderSourceCards();
         this.renderSettings();
+        this.renderQuickSetup();
         this.updateActiveSourcesCount();
     }
     
@@ -154,6 +163,22 @@ class SourceConfigManager {
                 if (config.settings && typeof config.settings === 'object') {
                     this.settings = { ...this.settings, ...config.settings };
                 }
+                if (savedVersion < 4) {
+                    if (!String(this.settings.topic || '').trim()) {
+                        this.settings.topic = 'SQL Server and Azure SQL';
+                    }
+                    if (Number(this.settings.maxItemsPerSource) === 5) {
+                        this.settings.maxItemsPerSource = 100;
+                        Object.values(this.sources).forEach((source) => {
+                            if (Number(source.maxItems) === 5) {
+                                source.maxItems = 100;
+                            }
+                        });
+                    }
+                    this.settings.candidateMultiplier = 10;
+                    this.settings.includeReplies = true;
+                    this.settings.autoSelectPublicSources = true;
+                }
                 const redditSource = this.sources.reddit;
                 const redditValues = Object.prototype.hasOwnProperty.call(
                     redditSource,
@@ -173,6 +198,9 @@ class SourceConfigManager {
                 }
                 if (this.settings.timeRangeMonths) {
                     this.settings.timeRangeMonths = parseInt(this.settings.timeRangeMonths);
+                }
+                if (this.settings.candidateMultiplier) {
+                    this.settings.candidateMultiplier = parseInt(this.settings.candidateMultiplier);
                 }
                 
                 // Ensure source maxItems are integers
@@ -400,6 +428,20 @@ class SourceConfigManager {
                 this.handleGithubRepoToggle(e.target);
             }
         });
+
+        document.addEventListener('click', (e) => {
+            if (e.target.matches('#previewSearchPlanBtn') || e.target.closest('#previewSearchPlanBtn')) {
+                this.previewSearchPlan();
+            }
+            if (e.target.matches('#openAdvancedSettingsBtn') || e.target.closest('#openAdvancedSettingsBtn')) {
+                const navItem = Array.from(document.querySelectorAll('.nav-item')).find(
+                    (item) => String(item.getAttribute('onclick') || '').includes('view-sources')
+                );
+                if (typeof window.switchView === 'function') {
+                    window.switchView('view-sources', navItem || null);
+                }
+            }
+        });
     }
     
     handleAddRepository(sourceCard) {
@@ -556,6 +598,9 @@ class SourceConfigManager {
         const sourceCard = toggle.closest('.source-card');
         const sourceId = sourceCard.dataset.source;
         this.sources[sourceId].enabled = toggle.checked;
+        this.settings.autoSelectPublicSources = false;
+        const quickAllPublicSources = document.getElementById('quickAllPublicSources');
+        if (quickAllPublicSources) quickAllPublicSources.checked = false;
         
         // Update UI
         sourceCard.classList.toggle('disabled', !toggle.checked);
@@ -616,7 +661,12 @@ class SourceConfigManager {
         let value = input.type === 'checkbox' ? input.checked : input.value;
         
         // Convert numeric fields to integers
-        if (field === 'maxItemsPerSource' || field === 'timeRangeMonths' || input.type === 'number') {
+        if (
+            field === 'maxItemsPerSource'
+            || field === 'timeRangeMonths'
+            || field === 'candidateMultiplier'
+            || input.type === 'number'
+        ) {
             value = parseInt(value);
         }
         
@@ -632,6 +682,118 @@ class SourceConfigManager {
         }
         
         this.saveConfiguration();
+    }
+
+    renderQuickSetup() {
+        const topicInput = document.getElementById('quickTopic');
+        const timeRange = document.getElementById('quickTimeRange');
+        const resultLimit = document.getElementById('quickResultLimit');
+        const includeReplies = document.getElementById('quickIncludeReplies');
+        const allPublicSources = document.getElementById('quickAllPublicSources');
+        if (topicInput) topicInput.value = this.settings.topic || '';
+        if (timeRange) timeRange.value = String(this.settings.timeRangeMonths);
+        if (resultLimit) resultLimit.value = String(this.settings.maxItemsPerSource);
+        if (includeReplies) includeReplies.checked = this.settings.includeReplies !== false;
+        if (allPublicSources) {
+            allPublicSources.checked = this.settings.autoSelectPublicSources !== false;
+        }
+    }
+
+    readQuickSettingsFromDom() {
+        const topicInput = document.getElementById('quickTopic');
+        const timeRange = document.getElementById('quickTimeRange');
+        const resultLimit = document.getElementById('quickResultLimit');
+        const includeReplies = document.getElementById('quickIncludeReplies');
+        const allPublicSources = document.getElementById('quickAllPublicSources');
+        return {
+            ...this.settings,
+            topic: topicInput
+                ? topicInput.value.trim()
+                : this.settings.topic,
+            timeRangeMonths: timeRange
+                ? parseInt(timeRange.value, 10)
+                : this.settings.timeRangeMonths,
+            maxItemsPerSource: resultLimit
+                ? parseInt(resultLimit.value, 10)
+                : this.settings.maxItemsPerSource,
+            includeReplies: includeReplies
+                ? includeReplies.checked
+                : this.settings.includeReplies,
+            autoSelectPublicSources: allPublicSources
+                ? allPublicSources.checked
+                : this.settings.autoSelectPublicSources
+        };
+    }
+
+    syncQuickSetupFromDom() {
+        const quickSettings = this.readQuickSettingsFromDom();
+        const limitChanged = (
+            Number(quickSettings.maxItemsPerSource)
+            !== Number(this.settings.maxItemsPerSource)
+        );
+        this.settings = quickSettings;
+        if (limitChanged) {
+            const limit = Number(quickSettings.maxItemsPerSource);
+            Object.values(this.sources).forEach((source) => {
+                source.maxItems = limit;
+            });
+        }
+        if (this.settings.autoSelectPublicSources !== false) {
+            [
+                'stackoverflow',
+                'dbaStackExchange',
+                'microsoftQA',
+                'techCommunity',
+                'hackerNews',
+                'devCommunity',
+                'githubIssues'
+            ].forEach((sourceId) => {
+                if (this.sources[sourceId]) this.sources[sourceId].enabled = true;
+            });
+        }
+        this.saveConfiguration();
+        this.updateActiveSourcesCount();
+        this.renderSourceCards();
+        this.renderSettings();
+    }
+
+    async previewSearchPlan() {
+        const previewSettings = this.readQuickSettingsFromDom();
+        const preview = document.getElementById('searchPlanPreview');
+        if (!preview) return;
+        if (!previewSettings.topic) {
+            preview.textContent = 'Describe the feedback you want to find first.';
+            preview.className = 'fluent-alert fluent-alert-warning mt-3';
+            return;
+        }
+        preview.textContent = 'Preparing source searches...';
+        preview.className = 'fluent-alert fluent-alert-info mt-3';
+        try {
+            const response = await fetch('/api/search-plan', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(previewSettings)
+            });
+            const result = await response.json();
+            if (!response.ok || result.status !== 'success') {
+                throw new Error(result.message || `HTTP ${response.status}`);
+            }
+            const terms = Array.isArray(result.search_terms)
+                ? result.search_terms
+                : [];
+            preview.replaceChildren();
+            const heading = document.createElement('strong');
+            heading.textContent = `${terms.length} source queries prepared`;
+            preview.appendChild(heading);
+            const copy = document.createElement('div');
+            copy.className = 'small mt-1';
+            copy.textContent = terms.join(' · ');
+            preview.appendChild(copy);
+            preview.className = 'fluent-alert fluent-alert-success mt-3';
+        } catch (error) {
+            preview.textContent = `Unable to prepare the search: ${error.message}`;
+            preview.className = 'fluent-alert fluent-alert-error mt-3';
+        }
     }
     
     updateSourceStatus(sourceId) {
@@ -720,9 +882,9 @@ class SourceConfigManager {
             },
             {
                 id: 'techCommunity',
-                name: 'Microsoft Tech Community',
-                icon: 'bi bi-chat-square-text',
-                description: 'Public SQL Server and Azure SQL discussions'
+                name: 'Microsoft SQL Blogs',
+                icon: 'bi bi-rss',
+                description: 'Official SQL Server and Azure SQL posts and comments'
             },
             {
                 id: 'hackerNews',
@@ -911,7 +1073,7 @@ class SourceConfigManager {
                         </select>
                     </div>
                     <div class="config-field">
-                        <label class="fluent-label">Max Items per Repository:</label>
+                        <label class="fluent-label">Relevant results across repositories:</label>
                         <input type="number" class="fluent-input source-input" 
                                data-field="maxItems" value="${window.SafeDOM.finiteNumber(source.maxItems, 5)}" min="1" max="1000">
                     </div>
@@ -977,7 +1139,7 @@ class SourceConfigManager {
                         </select>
                     </div>
                     <div class="config-field">
-                        <label class="fluent-label">Max Items per Repository:</label>
+                        <label class="fluent-label">Relevant results across repositories:</label>
                         <input type="number" class="fluent-input source-input" 
                                data-field="maxItems" value="${window.SafeDOM.finiteNumber(source.maxItems, 5)}" min="1" max="1000">
                     </div>
@@ -1000,11 +1162,11 @@ class SourceConfigManager {
                     stackoverflow: 'Uses the public Stack Exchange API for sql-server, azure-sql-database, and azure-sql-managed-instance.',
                     dbaStackExchange: 'Uses the public Stack Exchange API for SQL Server and Azure SQL database administration.',
                     microsoftQA: 'Searches public Microsoft Q&A results scoped to SQL Server.',
-                    techCommunity: 'Searches public Microsoft Tech Community discussions using the configured taxonomy.',
+                    techCommunity: 'Scans official Microsoft SQL Server and Azure SQL RSS feeds and their public comment feeds.',
                     hackerNews: 'Uses the public Hacker News Algolia API; no account or API key is required.',
                     devCommunity: 'Uses the public DEV/Forem API for SQL Server, Azure SQL, and MSSQL tags.'
                 }[sourceId];
-                const publicTerms = source.tags || source.queries || [];
+                const publicTerms = source.tags || source.queries || source.feeds || [];
                 const publicTermsMarkup = publicTerms.length > 0
                     ? `
                         <div class="config-field">
@@ -1096,38 +1258,48 @@ class SourceConfigManager {
         container.innerHTML = `
             <div class="config-field-row">
                 <div class="config-field">
-                    <label class="fluent-label">Time Range:</label>
+                    <label class="fluent-label">Lookback:</label>
                     <select class="fluent-select setting-input" data-field="timeRangeMonths">
                         <option value="1" ${this.settings.timeRangeMonths === 1 ? 'selected' : ''}>Last month</option>
                         <option value="3" ${this.settings.timeRangeMonths === 3 ? 'selected' : ''}>Last 3 months</option>
                         <option value="6" ${this.settings.timeRangeMonths === 6 ? 'selected' : ''}>Last 6 months</option>
                         <option value="12" ${this.settings.timeRangeMonths === 12 ? 'selected' : ''}>Last year</option>
+                        <option value="24" ${this.settings.timeRangeMonths === 24 ? 'selected' : ''}>Last 2 years</option>
                         <option value="0" ${this.settings.timeRangeMonths === 0 ? 'selected' : ''}>All time</option>
                     </select>
                 </div>
                 <div class="config-field">
-                    <label class="fluent-label">Max Items per Source:</label>
+                    <label class="fluent-label">Relevant results per source:</label>
                     <select class="fluent-select setting-input" data-field="maxItemsPerSource">
-                        <option value="5" ${parseInt(this.settings.maxItemsPerSource) === 5 ? 'selected' : ''}>5</option>
+                        <option value="25" ${parseInt(this.settings.maxItemsPerSource) === 25 ? 'selected' : ''}>25</option>
                         <option value="50" ${parseInt(this.settings.maxItemsPerSource) === 50 ? 'selected' : ''}>50</option>
                         <option value="100" ${parseInt(this.settings.maxItemsPerSource) === 100 ? 'selected' : ''}>100</option>
-                        <option value="200" ${parseInt(this.settings.maxItemsPerSource) === 200 ? 'selected' : ''}>200</option>
+                        <option value="250" ${parseInt(this.settings.maxItemsPerSource) === 250 ? 'selected' : ''}>250</option>
                         <option value="500" ${parseInt(this.settings.maxItemsPerSource) === 500 ? 'selected' : ''}>500</option>
+                        <option value="1000" ${parseInt(this.settings.maxItemsPerSource) === 1000 ? 'selected' : ''}>1,000</option>
+                    </select>
+                </div>
+                <div class="config-field">
+                    <label class="fluent-label">Candidate depth:</label>
+                    <select class="fluent-select setting-input" data-field="candidateMultiplier">
+                        <option value="5" ${parseInt(this.settings.candidateMultiplier) === 5 ? 'selected' : ''}>Balanced (5×)</option>
+                        <option value="10" ${parseInt(this.settings.candidateMultiplier) === 10 ? 'selected' : ''}>Thorough (10×)</option>
+                        <option value="25" ${parseInt(this.settings.candidateMultiplier) === 25 ? 'selected' : ''}>Maximum recall (25×)</option>
                     </select>
                 </div>
             </div>
             <div class="config-field" style="margin-top: 12px;">
                 <label class="fluent-label">
                     <input type="checkbox" class="fluent-checkbox setting-input" 
-                           data-field="respectRateLimits" ${this.settings.respectRateLimits ? 'checked' : ''}>
-                    Respect API rate limits
+                           data-field="includeReplies" ${this.settings.includeReplies !== false ? 'checked' : ''}>
+                    Include comments, answers, and replies when supported
                 </label>
             </div>
             <div class="config-field">
                 <label class="fluent-label">
                     <input type="checkbox" class="fluent-checkbox setting-input" 
-                           data-field="duplicateDetection" ${this.settings.duplicateDetection ? 'checked' : ''}>
-                    Enable duplicate detection
+                           data-field="respectRateLimits" ${this.settings.respectRateLimits ? 'checked' : ''}>
+                    Honor source rate limits and retry guidance
                 </label>
             </div>
         `;

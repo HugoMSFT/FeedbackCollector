@@ -27,7 +27,7 @@ class ModernFilterSystem {
         // Initialize sort and options from URL
         const urlParams = new URLSearchParams(window.location.search);
         this.currentSort = urlParams.get('sort') || 'newest';
-        this.showRepeating = urlParams.get('show_repeating') === 'true';
+        this.showRepeating = urlParams.get('show_repeating') !== 'false';
         this.searchQuery = urlParams.get('search') || '';
         
         // Initialize density from localStorage or default to 'cozy'
@@ -472,6 +472,7 @@ class ModernFilterSystem {
                 this.updateStatusDisplay();
                 console.log('🔧 FILTER BUTTON: Updated all filter button texts and status display after fetch completion');
             }, 50);
+            this.updateInfiniteScrollSentinel();
         }
     }
     
@@ -505,7 +506,7 @@ class ModernFilterSystem {
         }
         
         // Get the grid container
-        const gridContainer = container.querySelector('.row') || container;
+        const gridContainer = container.querySelector('#feedback-grid') || container;
         
         // Get current state data if available
         const fabricStateData = this.lastResponse?.fabric_state_data || window.fabricStateData || {};
@@ -1220,7 +1221,7 @@ class ModernFilterSystem {
                 <div class="spinner-border spinner-border-sm" role="status"></div>
                 <span class="ms-2">Loading more...</span>
             `;
-            sentinel.style.display = 'none';
+            sentinel.style.display = 'block';
             
             const container = document.getElementById(this.config.containerId);
             if (container && container.parentNode) {
@@ -1229,6 +1230,20 @@ class ModernFilterSystem {
         }
         
         observer.observe(sentinel);
+    }
+
+    updateInfiniteScrollSentinel() {
+        const sentinel = document.getElementById('scroll-sentinel');
+        if (!sentinel) return;
+        sentinel.style.display = this.hasMore ? 'block' : 'none';
+        const spinner = sentinel.querySelector('.spinner-border');
+        const label = sentinel.querySelector('span.ms-2');
+        if (spinner) spinner.style.visibility = this.isLoading ? 'visible' : 'hidden';
+        if (label) {
+            label.textContent = this.isLoading
+                ? 'Loading more...'
+                : 'Scroll for more feedback';
+        }
     }
     
     async loadMoreData() {
@@ -1240,10 +1255,7 @@ class ModernFilterSystem {
         if (sentinel) sentinel.style.display = 'block';
         
         await this.fetchFilteredData();
-        
-        if (sentinel) {
-            sentinel.style.display = this.hasMore ? 'none' : 'none';
-        }
+        this.updateInfiniteScrollSentinel();
     }
     
     showLoadingState() {
@@ -1449,12 +1461,13 @@ document.addEventListener('DOMContentLoaded', function() {
     if (document.getElementById('feedback-container')) {
         console.log('🔧 Setting up Modern Filter System...');
         
-        // Initialize the modern filter system
-        window.modernFilterSystem = new ModernFilterSystem({
-            enableRealTimeFiltering: false, // Start with manual apply
-            preserveStateManagement: true,
-            enableInfiniteScroll: true
-        });
+        if (!window.modernFilterSystem) {
+            window.modernFilterSystem = new ModernFilterSystem({
+                enableRealTimeFiltering: false,
+                preserveStateManagement: true,
+                enableInfiniteScroll: true
+            });
+        }
         
         // Override old filter functions for backward compatibility
         window.applyMultiSelectFilters = function() {
